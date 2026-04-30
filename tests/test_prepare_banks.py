@@ -118,28 +118,14 @@ def test_anatomy_bank_missing_parcellation_raises(tmp_path):
 def test_save_and_load_leadfield_roundtrip(tmp_path):
     mod = _load_prepare_banks()
     G = np.random.randn(64, 100).astype(np.float32)
-    path = tmp_path / "test_lf.npz"
-    mod._save_leadfield(path, G)
-    loaded = np.load(path, allow_pickle=False)["G"]
-    assert loaded.shape == (64, 100)
-    assert np.allclose(loaded, G)
-
-
-def test_save_and_load_montage_roundtrip(tmp_path):
-    mod = _load_prepare_banks()
-    coords = np.random.randn(64, 3).astype(np.float32)
     ch_names = [f"Ch{i:03d}" for i in range(64)]
-    path = tmp_path / "test_montage.npz"
-    mod._save_montage(path, coords, ch_names)
-
-    from synthgen.banks.montage import MontageBank
-    from synthgen.config import MontageBankConfig
-    bank = MontageBank(MontageBankConfig(bank_dir=tmp_path, montages=[]))
-    m = bank.load("test_montage")
-    assert m.coords.shape == (64, 3)
-    assert len(m.ch_names) == 64
-    assert m.ch_names[0] == "Ch000"
-
+    elec = np.random.randn(64, 3).astype(np.float32)
+    path = tmp_path / "test_lf.npz"
+    mod._save_leadfield(path, G, ch_names, elec)
+    data = np.load(path, allow_pickle=False)
+    np.testing.assert_array_equal(data["G"], G)
+    assert [str(s) for s in data["ch_names"]] == ch_names
+    np.testing.assert_array_equal(data["electrode_coords"], elec)
 
 # ---------------------------------------------------------------------------
 # Structural invariants (synthetic data, no MNE, no disk banks)
@@ -170,28 +156,15 @@ def test_leadfield_dtype_and_nan_invariants(tmp_path):
     mod = _load_prepare_banks()
     rng = np.random.default_rng(1)
     G = rng.standard_normal((64, 1000)).astype(np.float32)
+    ch_names = [f"Ch{i:03d}" for i in range(64)]
+    elec = rng.standard_normal((64, 3)).astype(np.float32)
     path = tmp_path / "G.npz"
-    mod._save_leadfield(path, G)
+    mod._save_leadfield(path, G, ch_names, elec)
     loaded = np.load(path, allow_pickle=False)["G"]
     assert loaded.dtype == np.float32
     assert loaded.shape == (64, 1000)
     assert not np.any(np.isnan(loaded))
     assert not np.any(np.isinf(loaded))
-
-
-def test_montage_dtype_and_nan_invariants(tmp_path):
-    mod = _load_prepare_banks()
-    rng = np.random.default_rng(2)
-    coords = rng.standard_normal((64, 3)).astype(np.float32)
-    ch_names = [f"Ch{i:03d}" for i in range(64)]
-    path = tmp_path / "montage.npz"
-    mod._save_montage(path, coords, ch_names)
-    data = np.load(path, allow_pickle=False)
-    assert data["coords"].dtype == np.float32
-    assert data["coords"].shape == (64, 3)
-    assert not np.any(np.isnan(data["coords"]))
-    assert not np.any(np.isinf(data["coords"]))
-    assert len(data["ch_names"]) == 64
 
 
 def test_adjacency_symmetry_preserved(tmp_path):
