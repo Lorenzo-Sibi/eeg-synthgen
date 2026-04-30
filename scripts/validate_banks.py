@@ -44,13 +44,14 @@ def _load_anatomy_raw(anat_dir: Path):
     return data["vertex_coords"], adj, parcellations, data["hemisphere"]
 
 
-def _load_leadfield_raw(path: Path) -> np.ndarray:
-    return np.load(path, allow_pickle=False)["G"]
-
-
-def _load_montage_raw(path: Path):
+def _load_leadfield_bundle(path: Path):
+    """Load (G, ch_names, electrode_coords) from a leadfield bundle NPZ."""
     data = np.load(path, allow_pickle=False)
-    return data["coords"], [str(s) for s in data["ch_names"]]
+    return (
+        data["G"],
+        [str(s) for s in data["ch_names"]],
+        data["electrode_coords"],
+    )
 
 
 def check_anatomies(banks_dir: Path):
@@ -118,66 +119,34 @@ def check_anatomies(banks_dir: Path):
     return results, fails
 
 
-def check_montages(banks_dir: Path):
-    results, fails = [], 0
-    mont_dir = banks_dir / "montage"
-    if not mont_dir.exists():
-        return results, fails
-    for npz in sorted(mont_dir.glob("*.npz")):
-        try:
-            coords, ch_names = _load_montage_raw(npz)
-        except Exception as exc:
-            results.append({"name": npz.stem, "status": "FAIL", "detail": str(exc)})
-            fails += 1
-            continue
-        C = len(ch_names)
-        issues = []
-        if coords.shape != (C, 3):
-            issues.append(f"coords shape {coords.shape} != ({C},3)")
-        if coords.dtype != np.float32:
-            issues.append(f"coords dtype {coords.dtype}")
-        if np.any(np.isnan(coords)) or np.any(np.isinf(coords)):
-            issues.append("NaN/Inf in coords")
-        if coords.min() < -150 or coords.max() > 150:
-            issues.append("coords out of [-150,150] mm")
-        if issues:
-            fails += 1
-        x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
-        results.append({
-            "name": npz.stem, "C": C,
-            "coord_range": (f"x[{x.min():.0f},{x.max():.0f}] "
-                            f"y[{y.min():.0f},{y.max():.0f}] "
-                            f"z[{z.min():.0f},{z.max():.0f}]"),
-            "status": "FAIL" if issues else "PASS",
-            "detail": "; ".join(issues),
-        })
-    return results, fails
-
-
 def check_leadfields(banks_dir: Path):
+    """Validate every leadfield bundle: G shape/dtype/finiteness, ch_names/electrode_coords sanity."""
     results, fails = [], 0
     lf_dir = banks_dir / "leadfield"
     if not lf_dir.exists():
         return results, fails
     for anat_d in sorted(p for p in lf_dir.iterdir() if p.is_dir()):
         for mont_d in sorted(p for p in anat_d.iterdir() if p.is_dir()):
-            for npz in sorted(p for p in mont_d.glob("*.npz") if p.name != "electrode_coords.npz"):
+            for npz in sorted(mont_d.glob("*.npz")):
                 label = f"{anat_d.name} / {mont_d.name} / {npz.stem}"
                 try:
-                    G = _load_leadfield_raw(npz)
+                    G, ch_names, elec = _load_leadfield_bundle(npz)
                 except Exception as exc:
                     results.append({"name": label, "status": "FAIL", "detail": str(exc)})
                     fails += 1
                     continue
                 issues = []
+                C = len(ch_names)
                 if G.dtype != np.float32:
-                    issues.append(f"dtype {G.dtype}")
+                    issues.append(f"G dtype {G.dtype}")
+                if G.shape[0] != C:
+                    issues.append(f"G C={G.shape[0]} != ch_names={C}")
                 n_nan = int(np.sum(np.isnan(G)))
                 n_inf = int(np.sum(np.isinf(G)))
                 if n_nan:
-                    issues.append(f"NaN={n_nan}")
+                    issues.append(f"G NaN={n_nan}")
                 if n_inf:
-                    issues.append(f"Inf={n_inf}")
+                    issues.append(f"G Inf={n_inf}")
                 col_norms = np.linalg.norm(G, axis=0)
                 n_zero = int((col_norms == 0).sum())
                 if n_zero:
@@ -188,6 +157,16 @@ def check_leadfields(banks_dir: Path):
                 cv = col_norms.std() / (col_norms.mean() + 1e-30)
                 if cv < 0.05:
                     issues.append(f"CV={cv:.3f} (spatially uniform?)")
+
+                if elec.shape != (C, 3):
+                    issues.append(f"electrode_coords shape {elec.shape} != ({C},3)")
+                if elec.dtype != np.float32:
+                    issues.append(f"electrode_coords dtype {elec.dtype}")
+                if np.any(np.isnan(elec)) or np.any(np.isinf(elec)):
+                    issues.append("NaN/Inf in electrode_coords")
+                if elec.size and (elec.min() < -150 or elec.max() > 200):
+                    issues.append("electrode_coords out of [-150,200] mm")
+
                 if issues:
                     fails += 1
                 results.append({
@@ -204,6 +183,7 @@ def check_leadfields(banks_dir: Path):
 
 
 def check_coherence(banks_dir: Path):
+    """Cross-check N(leadfield) == N(anatomy) for every bundle."""
     results, fails = [], 0
     lf_dir = banks_dir / "leadfield"
     if not lf_dir.exists():
@@ -211,19 +191,18 @@ def check_coherence(banks_dir: Path):
     for anat_d in sorted(p for p in lf_dir.iterdir() if p.is_dir()):
         anat_ss = banks_dir / "anatomy" / anat_d.name / "source_space.npz"
         for mont_d in sorted(p for p in anat_d.iterdir() if p.is_dir()):
-            mont_npz = banks_dir / "montage" / f"{mont_d.name}.npz"
-            for npz in sorted(p for p in mont_d.glob("*.npz") if p.name != "electrode_coords.npz"):
+            for npz in sorted(mont_d.glob("*.npz")):
                 label = f"{anat_d.name}__{mont_d.name}__{npz.stem}"
                 issues = []
                 try:
-                    G = _load_leadfield_raw(npz)
+                    G, ch_names, _ = _load_leadfield_bundle(npz)
                     C_G, N_G = G.shape
                 except Exception as exc:
                     results.append({"name": label, "status": "FAIL",
                                     "detail": f"leadfield: {exc}"})
                     fails += 1
                     continue
-                N_anat = C_mont = None
+                N_anat: int | None = None
                 if anat_ss.exists():
                     try:
                         d = np.load(anat_ss, allow_pickle=False)
@@ -232,23 +211,15 @@ def check_coherence(banks_dir: Path):
                         issues.append(f"anatomy load: {exc}")
                 else:
                     issues.append("anatomy file missing")
-                if mont_npz.exists():
-                    try:
-                        d = np.load(mont_npz, allow_pickle=False)
-                        C_mont = len(d["ch_names"])
-                    except Exception as exc:
-                        issues.append(f"montage load: {exc}")
-                else:
-                    issues.append("montage file missing")
                 if N_anat is not None and N_G != N_anat:
                     issues.append(f"N mismatch G={N_G} anatomy={N_anat}")
-                if C_mont is not None and C_G != C_mont:
-                    issues.append(f"C mismatch G={C_G} montage={C_mont}")
+                if C_G != len(ch_names):
+                    issues.append(f"C mismatch G={C_G} ch_names={len(ch_names)}")
                 if issues:
                     fails += 1
                 results.append({
                     "name": label,
-                    "c_match": f"C {C_G}=={C_mont}" if C_mont is not None else "C: montage missing",
+                    "c_match": f"C={C_G}",
                     "n_match": f"N {N_G}=={N_anat}" if N_anat is not None else "N: anatomy missing",
                     "status": "FAIL" if issues else "PASS",
                     "detail": "; ".join(issues),
@@ -312,56 +283,53 @@ def _try_mne_alignment(
 
 
 def _plot_banks(banks_dir: Path) -> None:
+    """Plot source-space + electrode clouds per anatomy, reading both from the
+    leadfield bundle (HEAD frame). Each anatomy gets one figure with one
+    subplot per (montage, conductivity) bundle present on disk."""
     import math
     import matplotlib.pyplot as plt
 
     anat_dir = banks_dir / "anatomy"
-    lf_dir   = banks_dir / "leadfield"
-    mont_dir = banks_dir / "montage"
+    lf_dir = banks_dir / "leadfield"
 
     anatomy_ids = (
         [d.name for d in sorted(anat_dir.iterdir()) if d.is_dir()]
         if anat_dir.exists() else []
     )
-    montage_ids = (
-        [p.stem for p in sorted(mont_dir.glob("*.npz"))]
-        if mont_dir.exists() else []
-    )
 
-    # ── 1. Source space + electrode scatter — one figure per anatomy ──────────
     for anat_id in anatomy_ids:
         ss_path = anat_dir / anat_id / "source_space.npz"
         if not ss_path.exists():
             continue
         ss = np.load(ss_path, allow_pickle=False)
-        vc   = ss["vertex_coords"]
+        vc = ss["vertex_coords"]
         hemi = ss["hemisphere"]
 
-        shown_montages = [
-            m for m in montage_ids
-            if (lf_dir / anat_id / m / "electrode_coords.npz").exists()
-               or (mont_dir / f"{m}.npz").exists()
-        ]
-        if not shown_montages:
+        anat_lf_dir = lf_dir / anat_id
+        if not anat_lf_dir.exists():
             continue
 
-        ncols = min(len(shown_montages), 4)
-        nrows = math.ceil(len(shown_montages) / ncols)
+        bundles: list[tuple[str, Path]] = []
+        for mont_d in sorted(p for p in anat_lf_dir.iterdir() if p.is_dir()):
+            for npz in sorted(mont_d.glob("*.npz")):
+                bundles.append((f"{mont_d.name}/{npz.stem}", npz))
+        if not bundles:
+            continue
+
+        ncols = min(len(bundles), 4)
+        nrows = math.ceil(len(bundles) / ncols)
         fig = plt.figure(figsize=(5 * ncols, 4 * nrows))
         fig.suptitle(
             f"{anat_id} — source space (blue=LH, red=RH) + electrodes (gold)",
             fontsize=10,
         )
 
-        for i, mont_id in enumerate(shown_montages):
-            elec_npz  = lf_dir / anat_id / mont_id / "electrode_coords.npz"
-            mont_path = mont_dir / f"{mont_id}.npz"
-            src = elec_npz if elec_npz.exists() else mont_path if mont_path.exists() else None
-            if src is None:
+        for i, (label, npz) in enumerate(bundles):
+            try:
+                _, ch_names, mc = _load_leadfield_bundle(npz)
+            except Exception as exc:
+                print(f"  [plot] {anat_id}/{label}: {exc}")
                 continue
-            d  = np.load(src, allow_pickle=False)
-            mc = d["coords"]
-            ch_names = [str(n) for n in d["ch_names"]] if "ch_names" in d else []
 
             ax = fig.add_subplot(nrows, ncols, i + 1, projection="3d")
             ax.scatter(vc[hemi == 0, 0], vc[hemi == 0, 1], vc[hemi == 0, 2],
@@ -369,7 +337,7 @@ def _plot_banks(banks_dir: Path) -> None:
             ax.scatter(vc[hemi == 1, 0], vc[hemi == 1, 1], vc[hemi == 1, 2],
                        s=1, alpha=0.15, c="tomato")
             ax.scatter(mc[:, 0], mc[:, 1], mc[:, 2], s=20, c="gold", zorder=5)
-            ax.set_title(mont_id, fontsize=8)
+            ax.set_title(label, fontsize=8)
             ax.set_xlabel("x", fontsize=7)
             ax.set_ylabel("y", fontsize=7)
             ax.set_zlabel("z", fontsize=7)
@@ -378,18 +346,12 @@ def _plot_banks(banks_dir: Path) -> None:
         plt.tight_layout()
         plt.show()
 
-        # MNE alignment (fsaverage / mne_sample only)
-        for mont_id in shown_montages:
-            elec_npz  = lf_dir / anat_id / mont_id / "electrode_coords.npz"
-            mont_path = mont_dir / f"{mont_id}.npz"
-            src = elec_npz if elec_npz.exists() else mont_path if mont_path.exists() else None
-            if src is None:
+        for label, npz in bundles:
+            try:
+                _, ch_names, mc = _load_leadfield_bundle(npz)
+            except Exception:
                 continue
-            d = np.load(src, allow_pickle=False)
-            mc = d["coords"]
-            ch_names = [str(n) for n in d["ch_names"]] if "ch_names" in d else [
-                f"EEG{j:03d}" for j in range(len(mc))
-            ]
+            mont_id = label.split("/", maxsplit=1)[0]
             _try_mne_alignment(anat_id, mont_id, mc, ch_names)
 
 
@@ -426,9 +388,6 @@ def main() -> None:
                         f"{r.get('coord_range',''):<44} "
                         f"hemi {r.get('hemi',''):<15} "
                         f"parcels={r.get('parcels','?'):<30} {status}{detail}")
-            elif title == "MONTAGE BANKS":
-                line = (f"  {r['name']:<25} C={r.get('C','?'):<5} "
-                        f"{r.get('coord_range',''):<44} {status}{detail}")
             elif title == "LEADFIELD BANKS":
                 line = (f"  {r['name']:<55} G={r.get('shape','?'):<14} "
                         f"col_norm {r.get('col_norm',''):<48} "
@@ -445,12 +404,10 @@ def main() -> None:
                 total_fail += 1
 
     anat_results, _ = check_anatomies(banks_dir)
-    mont_results, _ = check_montages(banks_dir)
     lf_results, _ = check_leadfields(banks_dir)
     coh_results, _ = check_coherence(banks_dir)
 
     _print_section("ANATOMY BANKS", anat_results)
-    _print_section("MONTAGE BANKS", mont_results)
     _print_section("LEADFIELD BANKS", lf_results)
     _print_section("CROSS-COHERENCE", coh_results)
 

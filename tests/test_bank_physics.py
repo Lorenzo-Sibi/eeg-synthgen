@@ -35,11 +35,15 @@ def _get_anatomy_ids() -> list[str]:
     ]
 
 
-def _get_montage_ids() -> list[str]:
-    mont_dir = BANKS_DIR / "montage"
-    if not mont_dir.exists():
-        return []
-    return [p.stem for p in sorted(mont_dir.glob("*.npz"))]
+def _is_bundle(npz: Path) -> bool:
+    """A leadfield bundle has G + ch_names + electrode_coords. Anything else
+    (e.g. legacy `electrode_coords.npz` or `standard.npz` from before the
+    refactor) is filtered out so stale files don't break parametrization."""
+    try:
+        keys = set(np.load(npz, allow_pickle=False).files)
+    except Exception:
+        return False
+    return {"G", "ch_names", "electrode_coords"}.issubset(keys)
 
 
 def _get_leadfield_combos() -> list[tuple[str, str, str]]:
@@ -54,7 +58,7 @@ def _get_leadfield_combos() -> list[tuple[str, str, str]]:
             if not mont_dir.is_dir():
                 continue
             for npz in sorted(mont_dir.glob("*.npz")):
-                if npz.name == "electrode_coords.npz":
+                if not _is_bundle(npz):
                     continue
                 combos.append((anat_dir.name, mont_dir.name, npz.stem))
     return combos
@@ -75,16 +79,17 @@ def _load_anatomy(anatomy_id: str):
     return data["vertex_coords"], adj, data["hemisphere"]
 
 
-def _load_leadfield(anatomy_id: str, montage_id: str, conductivity_id: str) -> np.ndarray:
-    return np.load(
+def _load_leadfield_bundle(anatomy_id: str, montage_id: str, conductivity_id: str):
+    """Load (G, ch_names, electrode_coords) from a leadfield bundle NPZ."""
+    data = np.load(
         BANKS_DIR / "leadfield" / anatomy_id / montage_id / f"{conductivity_id}.npz",
         allow_pickle=False,
-    )["G"]
-
-
-def _load_montage(montage_id: str):
-    data = np.load(BANKS_DIR / "montage" / f"{montage_id}.npz", allow_pickle=False)
-    return data["coords"], [str(s) for s in data["ch_names"]]
+    )
+    return (
+        data["G"],
+        [str(s) for s in data["ch_names"]],
+        data["electrode_coords"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -93,38 +98,35 @@ def _load_montage(montage_id: str):
 
 _SKIP = pytest.mark.skip(reason="banks/ not populated — run prepare_banks.py first")
 _ANATOMY_IDS = _get_anatomy_ids()
-_MONTAGE_IDS = _get_montage_ids()
 _LF_COMBOS = _get_leadfield_combos()
 
 _ANATOMY_PARAMS = _ANATOMY_IDS or [pytest.param("_", marks=_SKIP)]
-_MONTAGE_PARAMS = _MONTAGE_IDS or [pytest.param("_", marks=_SKIP)]
 _LF_PARAMS = _LF_COMBOS or [pytest.param("_", "_", "_", marks=_SKIP)]
 
 
 # ---------------------------------------------------------------------------
-# Cross-coherence: G dims must match anatomy N and montage C
+# Cross-coherence: G dims must match anatomy N and bundle C
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("anatomy_id,montage_id,conductivity_id", _LF_PARAMS)
 def test_leadfield_shape_matches_anatomy_and_montage(anatomy_id, montage_id, conductivity_id):
-    G = _load_leadfield(anatomy_id, montage_id, conductivity_id)
+    G, ch_names, coords = _load_leadfield_bundle(anatomy_id, montage_id, conductivity_id)
     vertex_coords, _, _ = _load_anatomy(anatomy_id)
-    coords, ch_names = _load_montage(montage_id)
 
     assert G.shape[1] == vertex_coords.shape[0], (
         f"G N={G.shape[1]} != anatomy N={vertex_coords.shape[0]} "
         f"for {anatomy_id}/{montage_id}/{conductivity_id}"
     )
     assert G.shape[0] == len(ch_names), (
-        f"G C={G.shape[0]} != montage ch_names C={len(ch_names)}"
+        f"G C={G.shape[0]} != ch_names C={len(ch_names)}"
     )
     assert G.shape[0] == coords.shape[0], (
-        f"G C={G.shape[0]} != montage coords C={coords.shape[0]}"
+        f"G C={G.shape[0]} != electrode_coords C={coords.shape[0]}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Coordinate range: all coordinates must be within [-150, 150] mm
+# Coordinate range: all coordinates must be within [-150, 200] mm (HEAD frame)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("anatomy_id", _ANATOMY_PARAMS)
@@ -133,19 +135,19 @@ def test_vertex_coords_in_head_scale_mm(anatomy_id):
     assert vertex_coords.min() >= -150.0, (
         f"{anatomy_id}: vertex_coords min {vertex_coords.min():.1f} mm < -150"
     )
-    assert vertex_coords.max() <= 150.0, (
-        f"{anatomy_id}: vertex_coords max {vertex_coords.max():.1f} mm > 150"
+    assert vertex_coords.max() <= 200.0, (
+        f"{anatomy_id}: vertex_coords max {vertex_coords.max():.1f} mm > 200"
     )
 
 
-@pytest.mark.parametrize("montage_id", _MONTAGE_PARAMS)
-def test_montage_coords_in_head_scale_mm(montage_id):
-    coords, _ = _load_montage(montage_id)
+@pytest.mark.parametrize("anatomy_id,montage_id,conductivity_id", _LF_PARAMS)
+def test_electrode_coords_in_head_scale_mm(anatomy_id, montage_id, conductivity_id):
+    _, _, coords = _load_leadfield_bundle(anatomy_id, montage_id, conductivity_id)
     assert coords.min() >= -150.0, (
-        f"{montage_id}: electrode coords min {coords.min():.1f} mm < -150"
+        f"{anatomy_id}/{montage_id}: electrode coords min {coords.min():.1f} mm < -150"
     )
-    assert coords.max() <= 150.0, (
-        f"{montage_id}: electrode coords max {coords.max():.1f} mm > 150"
+    assert coords.max() <= 200.0, (
+        f"{anatomy_id}/{montage_id}: electrode coords max {coords.max():.1f} mm > 200"
     )
 
 
@@ -155,14 +157,14 @@ def test_montage_coords_in_head_scale_mm(montage_id):
 
 @pytest.mark.parametrize("anatomy_id,montage_id,conductivity_id", _LF_PARAMS)
 def test_leadfield_no_nan_inf(anatomy_id, montage_id, conductivity_id):
-    G = _load_leadfield(anatomy_id, montage_id, conductivity_id)
+    G, _, _ = _load_leadfield_bundle(anatomy_id, montage_id, conductivity_id)
     assert not np.any(np.isnan(G)), f"NaN in G for {anatomy_id}/{montage_id}"
     assert not np.any(np.isinf(G)), f"Inf in G for {anatomy_id}/{montage_id}"
 
 
 @pytest.mark.parametrize("anatomy_id,montage_id,conductivity_id", _LF_PARAMS)
 def test_leadfield_no_zero_columns(anatomy_id, montage_id, conductivity_id):
-    G = _load_leadfield(anatomy_id, montage_id, conductivity_id)
+    G, _, _ = _load_leadfield_bundle(anatomy_id, montage_id, conductivity_id)
     col_norms = np.linalg.norm(G, axis=0)
     n_zero = int((col_norms == 0).sum())
     assert n_zero == 0, (
@@ -173,7 +175,7 @@ def test_leadfield_no_zero_columns(anatomy_id, montage_id, conductivity_id):
 @pytest.mark.parametrize("anatomy_id,montage_id,conductivity_id", _LF_PARAMS)
 def test_leadfield_column_norm_ratio(anatomy_id, montage_id, conductivity_id):
     """max/mean column norm < 1e4: no single source dominates pathologically."""
-    G = _load_leadfield(anatomy_id, montage_id, conductivity_id)
+    G, _, _ = _load_leadfield_bundle(anatomy_id, montage_id, conductivity_id)
     col_norms = np.linalg.norm(G, axis=0)
     ratio = col_norms.max() / (col_norms.mean() + 1e-30)
     assert ratio < 1e4, (
@@ -185,11 +187,10 @@ def test_leadfield_column_norm_ratio(anatomy_id, montage_id, conductivity_id):
 def test_leadfield_spatial_variation(anatomy_id, montage_id, conductivity_id):
     """Column norm CV > 0.05: leadfield must not be spatially uniform.
 
-    Note: vertex_coords (MRI frame) and montage.coords (head frame) cannot be
-    compared directly without the trans matrix, so spatial variation is tested
-    via coefficient of variation instead of distance-decay.
+    Both vertex_coords and electrode_coords are now in the same HEAD frame,
+    but the column-norm CV check is a frame-agnostic plausibility test.
     """
-    G = _load_leadfield(anatomy_id, montage_id, conductivity_id)
+    G, _, _ = _load_leadfield_bundle(anatomy_id, montage_id, conductivity_id)
     col_norms = np.linalg.norm(G, axis=0)
     cv = col_norms.std() / (col_norms.mean() + 1e-30)
     assert cv > 0.05, (
