@@ -11,8 +11,7 @@ leadfield_bank:
   conductivity_ids:
     - standard
 
-montage_bank:
-  bank_dir: banks/montage
+montages:
   montages:
     - {name: standard_1005_32,  n_channels: 32,  split_role: core}
     - {name: standard_1005_64,  n_channels: 64,  split_role: core}

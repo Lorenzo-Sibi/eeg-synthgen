@@ -10,7 +10,7 @@ from synthgen.config import (
     ConnectivityBankConfig,
     GenerationConfig,
     LeadfieldBankConfig,
-    MontageBankConfig,
+    MontageConfig,
     TVBBackendConfig,
     TemporalConfig,
     WriterConfig,
@@ -50,7 +50,7 @@ def _tiny_config(tmp_path, window_s=0.2, reservoir_duration_s=2.0, reservoir_siz
     return GenerationConfig(
         anatomy_bank=AnatomyBankConfig(bank_dir=tmp_path / "a"),
         leadfield_bank=LeadfieldBankConfig(bank_dir=tmp_path / "l"),
-        montage_bank=MontageBankConfig(bank_dir=tmp_path / "m"),
+        montages=MontageConfig(),
         connectivity_bank=ConnectivityBankConfig(bank_dir=tmp_path / "c"),
         temporal=TemporalConfig(sfreq=500.0, window_s=window_s),
         writer=WriterConfig(output_dir=tmp_path / "out"),

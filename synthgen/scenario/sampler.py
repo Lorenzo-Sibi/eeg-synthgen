@@ -30,12 +30,12 @@ class ScenarioSampler:
         self._difficulties = ["easy", "medium", "hard"]
         self._difficulty_weights = [dw.easy, dw.medium, dw.hard]
         self._ood_fraction = plan.ood_fraction
-        self._core_montages = [m for m in config.montage_bank.montages if m.split_role == "core"]
+        self._core_montages = [m for m in config.montages.montages if m.split_role == "core"]
         if not self._core_montages:
             raise ValueError(
                 "No core montages found in config; at least one montage must have split_role='core'"
             )
-        self._ood_montages = [m for m in config.montage_bank.montages if m.split_role == "ood"]
+        self._ood_montages = [m for m in config.montages.montages if m.split_role == "ood"]
         self._conductivity_ids = config.leadfield_bank.conductivity_ids
         self._anatomy_ids = config.anatomy_bank.anatomy_ids
         self._signal_families = config.temporal.signal_families

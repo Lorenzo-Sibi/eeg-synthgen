@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from synthgen.config import AnatomyBankConfig, LeadfieldBankConfig, MontageBankConfig
+from synthgen.config import AnatomyBankConfig, LeadfieldBankConfig
 from synthgen.banks.anatomy import AnatomyBank
 from synthgen.sample import SourceSpace
 
@@ -58,7 +58,7 @@ def test_anatomy_bank_raises_for_missing(tmp_path):
         bank.load("nonexistent")
 
 
-from synthgen.banks.leadfield import LeadfieldBank
+from synthgen.banks.leadfield import LeadfieldBank, LeadfieldData
 
 
 def _make_leadfield_npz(tmp_path, anatomy_id: str, montage_id: str,
@@ -68,25 +68,31 @@ def _make_leadfield_npz(tmp_path, anatomy_id: str, montage_id: str,
     np.savez_compressed(
         d / f"{conductivity_id}.npz",
         G=np.random.randn(C, N).astype(np.float32),
+        ch_names=np.array([f"Ch{i:03d}" for i in range(C)]),
+        electrode_coords=np.random.randn(C, 3).astype(np.float32),
     )
 
 
-def test_leadfield_bank_loads_matrix(tmp_path):
+def test_leadfield_bank_loads_bundle(tmp_path):
     _make_leadfield_npz(tmp_path, "fsaverage", "standard_1005_64", "standard", C=64, N=50)
     config = LeadfieldBankConfig(bank_dir=tmp_path / "leadfield")
     bank = LeadfieldBank(config)
-    G = bank.load("fsaverage__standard_1005_64__standard")
-    assert G.shape == (64, 50)
-    assert G.dtype == np.float32
+    lf = bank.load("fsaverage__standard_1005_64__standard")
+    assert isinstance(lf, LeadfieldData)
+    assert lf.G.shape == (64, 50)
+    assert lf.G.dtype == np.float32
+    assert lf.ch_names == [f"Ch{i:03d}" for i in range(64)]
+    assert lf.electrode_coords.shape == (64, 3)
+    assert lf.electrode_coords.dtype == np.float32
 
 
 def test_leadfield_bank_caches_in_memory(tmp_path):
     _make_leadfield_npz(tmp_path, "fsaverage", "standard_1005_64", "standard")
     config = LeadfieldBankConfig(bank_dir=tmp_path / "leadfield")
     bank = LeadfieldBank(config)
-    G1 = bank.load("fsaverage__standard_1005_64__standard")
-    G2 = bank.load("fsaverage__standard_1005_64__standard")
-    assert G1 is G2
+    lf1 = bank.load("fsaverage__standard_1005_64__standard")
+    lf2 = bank.load("fsaverage__standard_1005_64__standard")
+    assert lf1 is lf2
 
 
 def test_leadfield_bank_raises_for_missing(tmp_path):
@@ -103,51 +109,3 @@ def test_leadfield_bank_raises_for_invalid_id(tmp_path):
         bank.load("bad_id_format")
 
 
-from synthgen.banks.montage import MontageBank, MontageData
-
-
-def _make_montage_npz(tmp_path, montage_id: str, C: int = 64) -> None:
-    d = tmp_path / "montage"
-    d.mkdir(parents=True, exist_ok=True)
-    ch_names = np.array([f"Ch{i:03d}" for i in range(C)])
-    np.savez_compressed(
-        d / f"{montage_id}.npz",
-        coords=np.random.randn(C, 3).astype(np.float32),
-        ch_names=ch_names,
-    )
-
-
-def test_montage_bank_loads_data(tmp_path):
-    _make_montage_npz(tmp_path, "standard_1005_64", C=64)
-    config = MontageBankConfig(bank_dir=tmp_path / "montage", montages=[])
-    bank = MontageBank(config)
-    m = bank.load("standard_1005_64")
-    assert isinstance(m, MontageData)
-    assert m.coords.shape == (64, 3)
-    assert len(m.ch_names) == 64
-    assert m.ch_names[0] == "Ch000"
-
-
-def test_montage_bank_caches_in_memory(tmp_path):
-    _make_montage_npz(tmp_path, "standard_1005_64", C=64)
-    config = MontageBankConfig(bank_dir=tmp_path / "montage", montages=[])
-    bank = MontageBank(config)
-    m1 = bank.load("standard_1005_64")
-    m2 = bank.load("standard_1005_64")
-    assert m1 is m2
-
-
-def test_montage_bank_raises_for_missing(tmp_path):
-    config = MontageBankConfig(bank_dir=tmp_path / "montage", montages=[])
-    bank = MontageBank(config)
-    with pytest.raises(FileNotFoundError):
-        bank.load("nonexistent_montage")
-
-
-def test_montage_data_coords_are_float(tmp_path):
-    _make_montage_npz(tmp_path, "standard_1005_128", C=128)
-    config = MontageBankConfig(bank_dir=tmp_path / "montage", montages=[])
-    bank = MontageBank(config)
-    m = bank.load("standard_1005_128")
-    assert m.coords.dtype == np.float32
-    assert m.coords.shape == (128, 3)

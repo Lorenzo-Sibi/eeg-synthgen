@@ -46,8 +46,7 @@ anatomy_bank:
   bank_dir: banks/anatomy
 leadfield_bank:
   bank_dir: banks/leadfield
-montage_bank:
-  bank_dir: banks/montage
+montages:
   montages: []
 writer:
   output_dir: data/generated
@@ -66,8 +65,7 @@ anatomy_bank:
   bank_dir: banks/anatomy
 leadfield_bank:
   bank_dir: banks/leadfield
-montage_bank:
-  bank_dir: banks/montage
+montages:
   montages: []
 writer:
   output_dir: data/generated
@@ -85,7 +83,7 @@ def test_default_yaml_loads():
     config = GenerationConfig.from_yaml(config_path)
     assert config.backend == "sereega"
     assert config.temporal.n_samples_per_window == 500
-    core_montages = [m for m in config.montage_bank.montages if m.split_role == "core"]
+    core_montages = [m for m in config.montages.montages if m.split_role == "core"]
     assert len(core_montages) == 6
     prior_w = config.scenario_plan.prior_family_weights
     total = (
@@ -113,7 +111,7 @@ def test_tvb_config_from_yaml(tmp_path):
     cfg_dict = {
         "anatomy_bank": {"bank_dir": "banks/anatomy"},
         "leadfield_bank": {"bank_dir": "banks/leadfield"},
-        "montage_bank": {"bank_dir": "banks/montage", "montages": []},
+        "montages": {"montages": []},
         "writer": {"output_dir": "out"},
         "tvb": {
             "model": "jansen_rit",

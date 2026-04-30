@@ -78,8 +78,7 @@ class LeadfieldBankConfig(BaseModel):
     conductivity_ids: list[str] = ["standard"]
 
 
-class MontageBankConfig(BaseModel):
-    bank_dir: Path
+class MontageConfig(BaseModel):
     montages: list[MontageEntry] = Field(default_factory=list)
 
 
@@ -168,7 +167,7 @@ class TVBBackendConfig(BaseModel):
 class GenerationConfig(BaseModel):
     anatomy_bank: AnatomyBankConfig
     leadfield_bank: LeadfieldBankConfig
-    montage_bank: MontageBankConfig
+    montages: MontageConfig
     connectivity_bank: ConnectivityBankConfig = Field(
         default_factory=lambda: ConnectivityBankConfig(bank_dir=Path("banks/connectivity"))
     )

@@ -10,8 +10,7 @@ def _make_config(tmp_path):
     cfg = {
         "anatomy_bank": {"bank_dir": str(tmp_path / "anatomy"), "anatomy_ids": ["fsaverage"]},
         "leadfield_bank": {"bank_dir": str(tmp_path / "leadfield"), "conductivity_ids": ["standard"]},
-        "montage_bank": {
-            "bank_dir": str(tmp_path / "montage"),
+        "montages": {
             "montages": [
                 {"name": "standard_1005_64", "n_channels": 64, "split_role": "core"},
                 {"name": "standard_1005_21", "n_channels": 21, "split_role": "ood"},
@@ -43,7 +42,7 @@ def test_sampler_fields_populated(tmp_path):
     sc = sampler.sample(np.random.default_rng(1))
     assert sc.scenario_id != ""
     assert sc.anatomy_id in config.anatomy_bank.anatomy_ids
-    assert sc.montage_id in [m.name for m in config.montage_bank.montages]
+    assert sc.montage_id in [m.name for m in config.montages.montages]
     assert sc.prior_family in ["local_contiguous", "network_aware", "state_dependent",
                                 "broad_random", "tvb_stub"]
     assert sc.n_sources >= 1
@@ -98,8 +97,7 @@ def test_sampler_raises_if_no_core_montages(tmp_path):
     cfg = {
         "anatomy_bank": {"bank_dir": str(tmp_path / "anatomy"), "anatomy_ids": ["fsaverage"]},
         "leadfield_bank": {"bank_dir": str(tmp_path / "leadfield"), "conductivity_ids": ["standard"]},
-        "montage_bank": {
-            "bank_dir": str(tmp_path / "montage"),
+        "montages": {
             "montages": [
                 {"name": "standard_1005_21", "n_channels": 21, "split_role": "ood"},
             ],
@@ -271,14 +269,12 @@ def _make_bank_files(tmp_path, N: int = 20, C: int = 8, scheme: str = "desikan_k
     lf_dir = tmp_path / "leadfield" / "fsaverage" / "standard_1005_64"
     lf_dir.mkdir(parents=True)
     G = np.random.default_rng(0).standard_normal((C, N)).astype(np.float32) * 0.01
-    np.savez_compressed(lf_dir / "standard.npz", G=G)
-    montage_dir = tmp_path / "montage"
-    montage_dir.mkdir(parents=True)
     ch_names = np.array([f"EEG{i:03d}" for i in range(C)], dtype=str)
     np.savez_compressed(
-        montage_dir / "standard_1005_64.npz",
-        coords=np.zeros((C, 3), dtype=np.float32),
+        lf_dir / "standard.npz",
+        G=G,
         ch_names=ch_names,
+        electrode_coords=np.zeros((C, 3), dtype=np.float32),
     )
 
 
@@ -287,8 +283,7 @@ def _make_runner_config(tmp_path, N: int = 20, C: int = 8, n_samples: int = 3):
     cfg = {
         "anatomy_bank": {"bank_dir": str(tmp_path / "anatomy"), "anatomy_ids": ["fsaverage"]},
         "leadfield_bank": {"bank_dir": str(tmp_path / "leadfield"), "conductivity_ids": ["standard"]},
-        "montage_bank": {
-            "bank_dir": str(tmp_path / "montage"),
+        "montages": {
             "montages": [{"name": "standard_1005_64", "n_channels": C, "split_role": "core"}],
         },
         "writer": {"output_dir": str(tmp_path / "out"), "chunk_size": 256},
@@ -373,7 +368,7 @@ def test_pipeline_selects_tvb_backend_when_configured(tmp_path):
     pytest.importorskip("tvb")
     from synthgen.config import (
         AnatomyBankConfig, ConnectivityBankConfig, GenerationConfig,
-        LeadfieldBankConfig, MontageBankConfig, MontageEntry,
+        LeadfieldBankConfig, MontageConfig, MontageEntry,
         TVBBackendConfig, WriterConfig,
     )
     from synthgen.sources.tvb_backend import TVBSourceGenerator
@@ -391,8 +386,7 @@ def test_pipeline_selects_tvb_backend_when_configured(tmp_path):
     cfg = GenerationConfig(
         anatomy_bank=AnatomyBankConfig(bank_dir=tmp_path / "a"),
         leadfield_bank=LeadfieldBankConfig(bank_dir=tmp_path / "l"),
-        montage_bank=MontageBankConfig(
-            bank_dir=tmp_path / "m",
+        montages=MontageConfig(
             montages=[MontageEntry(name="standard_1005_64", n_channels=64, split_role="core")],
         ),
         connectivity_bank=ConnectivityBankConfig(bank_dir=conn_dir),

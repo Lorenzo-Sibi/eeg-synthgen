@@ -6,7 +6,6 @@ from synthgen.acquisition.pipeline import AcquisitionPipeline
 from synthgen.banks.anatomy import AnatomyBank
 from synthgen.banks.connectivity import ConnectivityBank
 from synthgen.banks.leadfield import LeadfieldBank
-from synthgen.banks.montage import MontageBank
 from synthgen.config import GenerationConfig
 from synthgen.scenario.sampler import ScenarioSampler
 from synthgen.sources.priors.broad_random import BroadRandomPrior
@@ -40,7 +39,6 @@ class PipelineRunner:
         self._config = config
         self._anatomy_bank = AnatomyBank(config.anatomy_bank)
         self._leadfield_bank = LeadfieldBank(config.leadfield_bank)
-        self._montage_bank = MontageBank(config.montage_bank)
         if config.backend == "sereega":
             self._backend = SEREEGABackend(config)
         elif config.backend == "tvb":
@@ -75,11 +73,10 @@ class PipelineRunner:
                 scenario = self._sampler.sample(rng)
                 scenario_rng = np.random.default_rng(scenario.seed)
 
-                # Load anatomy, leadfield, montage - skip if bank not prepared
+                # Load anatomy and leadfield bundle - skip if bank not prepared
                 try:
                     source_space = self._anatomy_bank.load(scenario.anatomy_id)
                     leadfield = self._leadfield_bank.load(scenario.leadfield_id)
-                    montage = self._montage_bank.load(scenario.montage_id)
                 except FileNotFoundError:
                     n_skipped_bank += 1
                     continue
@@ -99,9 +96,9 @@ class PipelineRunner:
                     source_space,
                     source_activity,
                     background_activity,
-                    leadfield,
-                    montage.coords,
-                    montage.ch_names,
+                    leadfield.G,
+                    leadfield.electrode_coords,
+                    leadfield.ch_names,
                     scenario_rng,
                 )
 

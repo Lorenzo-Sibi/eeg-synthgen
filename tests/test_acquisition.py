@@ -30,7 +30,7 @@ def _make_config(tmp_path):
     cfg = {
         "anatomy_bank": {"bank_dir": str(tmp_path / "anatomy")},
         "leadfield_bank": {"bank_dir": str(tmp_path / "leadfield")},
-        "montage_bank": {"bank_dir": str(tmp_path / "montage"), "montages": []},
+        "montages": {"montages": []},
         "writer": {"output_dir": str(tmp_path / "out")},
     }
     p = tmp_path / "cfg.yaml"
