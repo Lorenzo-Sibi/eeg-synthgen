@@ -38,6 +38,23 @@ def test_temporal_config_defaults():
     assert t.sfreq == 500.0
     assert t.window_s == 1.0
     assert t.n_samples_per_window == 500
+    assert t.signal_family_weights is None
+
+
+def test_temporal_config_accepts_signal_family_weights():
+    t = TemporalConfig(
+        signal_families=["erp", "oscillatory_burst"],
+        signal_family_weights=[0.25, 0.75],
+    )
+    assert t.signal_family_weights == [0.25, 0.75]
+
+
+def test_temporal_config_rejects_bad_signal_family_weights():
+    with pytest.raises(ValidationError):
+        TemporalConfig(
+            signal_families=["erp", "oscillatory_burst"],
+            signal_family_weights=[1.0],
+        )
 
 
 def test_generation_config_from_yaml(tmp_path):
@@ -127,3 +144,54 @@ def test_tvb_config_from_yaml(tmp_path):
     assert cfg.tvb.reservoir_size == 42
     assert cfg.tvb.connectivity_scheme == "my_scheme"
     assert cfg.tvb.global_coupling == pytest.approx(0.05)
+
+
+def test_sereega_config_defaults_load():
+    from synthgen.config import SEREEGABackendConfig
+
+    c = SEREEGABackendConfig()
+    assert c.erp_peak_count_weights == {1: 1.0}
+    assert c.latency_jitter_s_range == (0.05, 0.30)
+    assert c.amplitude_range == (0.5, 2.0)
+    assert c.background_amplitude_range == (0.1, 0.1)
+
+
+def test_sereega_config_from_yaml(tmp_path):
+    import yaml
+
+    cfg_dict = {
+        "anatomy_bank": {"bank_dir": "banks/anatomy"},
+        "leadfield_bank": {"bank_dir": "banks/leadfield"},
+        "montages": {"montages": []},
+        "writer": {"output_dir": "out"},
+        "sereega": {
+            "erp_peak_count_weights": {1: 0.25, 2: 0.75},
+            "amplitude_range": [2.0, 3.0],
+            "background_amplitude_range": [0.05, 0.15],
+        },
+    }
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml.dump(cfg_dict))
+    cfg = GenerationConfig.from_yaml(p)
+    assert cfg.sereega.erp_peak_count_weights == {1: 0.25, 2: 0.75}
+    assert cfg.sereega.amplitude_range == (2.0, 3.0)
+    assert cfg.sereega.background_amplitude_range == (0.05, 0.15)
+
+
+def test_sereega_config_rejects_invalid_range(tmp_path):
+    yaml_content = """
+anatomy_bank:
+  bank_dir: banks/anatomy
+leadfield_bank:
+  bank_dir: banks/leadfield
+montages:
+  montages: []
+writer:
+  output_dir: out
+sereega:
+  erp_width_s_range: [0.08, 0.02]
+"""
+    p = tmp_path / "bad_sereega.yaml"
+    p.write_text(yaml_content)
+    with pytest.raises(ValidationError):
+        GenerationConfig.from_yaml(p)

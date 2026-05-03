@@ -39,6 +39,7 @@ class ScenarioSampler:
         self._conductivity_ids = config.leadfield_bank.conductivity_ids
         self._anatomy_ids = config.anatomy_bank.anatomy_ids
         self._signal_families = config.temporal.signal_families
+        self._signal_family_weights = config.temporal.signal_family_weights
 
     def sample(self, rng: np.random.Generator) -> Scenario:
         seed = int(rng.integers(0, 2 ** 63))
@@ -61,7 +62,16 @@ class ScenarioSampler:
             rng,
         ))
         difficulty = _weighted_choice(self._difficulties, self._difficulty_weights, rng)
-        signal_family = str(self._signal_families[int(rng.integers(0, len(self._signal_families)))])
+        if self._signal_family_weights is None:
+            signal_family = str(
+                self._signal_families[int(rng.integers(0, len(self._signal_families)))]
+            )
+        else:
+            signal_family = _weighted_choice(
+                self._signal_families,
+                self._signal_family_weights,
+                rng,
+            )
 
         scenario_id = f"s{seed:020d}"
 

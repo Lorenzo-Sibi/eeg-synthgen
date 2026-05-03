@@ -96,6 +96,20 @@ class TemporalConfig(BaseModel):
         "ar_correlated",
         "spike_interictal",
     ]
+    signal_family_weights: list[float] | None = None
+
+    @model_validator(mode="after")
+    def weights_match_signal_families(self) -> TemporalConfig:
+        if self.signal_family_weights is None:
+            return self
+        if len(self.signal_family_weights) != len(self.signal_families):
+            raise ValueError("signal_family_weights must match signal_families length")
+        if any(w < 0.0 for w in self.signal_family_weights):
+            raise ValueError("signal_family_weights must be non-negative")
+        total = sum(self.signal_family_weights)
+        if abs(total - 1.0) > 1e-5:
+            raise ValueError("signal_family_weights must sum to 1.0")
+        return self
 
     @property
     def n_samples_per_window(self) -> int:
@@ -151,6 +165,53 @@ class WriterConfig(BaseModel):
     chunk_size: int = Field(default=256, gt=0)
 
 
+def _check_range(name: str, value: tuple[float, float], *, ge: float | None = None) -> None:
+    lo, hi = value
+    if lo > hi:
+        raise ValueError(f"{name} lower bound must be <= upper bound, got {value}")
+    if ge is not None and lo < ge:
+        raise ValueError(f"{name} lower bound must be >= {ge}, got {value}")
+
+
+def _check_weight_dict(name: str, weights: dict[int, float]) -> None:
+    if not weights:
+        raise ValueError(f"{name} must contain at least one entry")
+    if any(k <= 0 for k in weights):
+        raise ValueError(f"{name} keys must be positive integers")
+    if any(v < 0.0 for v in weights.values()):
+        raise ValueError(f"{name} weights must be non-negative")
+    total = sum(weights.values())
+    if abs(total - 1.0) > 1e-5:
+        raise ValueError(f"{name} weights must sum to 1.0, got {total:.4f}")
+
+
+class SEREEGABackendConfig(BaseModel):
+    """Small set of knobs controlling SEREEGA-style waveform variability."""
+
+    erp_peak_count_weights: dict[int, float] = Field(default_factory=lambda: {1: 1.0})
+    latency_jitter_s_range: tuple[float, float] = (0.05, 0.30)
+    amplitude_range: tuple[float, float] = (0.5, 2.0)
+    erp_width_s_range: tuple[float, float] = (0.02, 0.08)
+    burst_width_s_range: tuple[float, float] = (0.10, 0.20)
+    ar_coefficient_range: tuple[float, float] = (0.70, 0.97)
+    background_amplitude_range: tuple[float, float] = (0.1, 0.1)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> SEREEGABackendConfig:
+        _check_weight_dict("sereega.erp_peak_count_weights", self.erp_peak_count_weights)
+        _check_range("sereega.latency_jitter_s_range", self.latency_jitter_s_range, ge=0.0)
+        _check_range("sereega.amplitude_range", self.amplitude_range, ge=0.0)
+        _check_range("sereega.erp_width_s_range", self.erp_width_s_range, ge=1e-9)
+        _check_range("sereega.burst_width_s_range", self.burst_width_s_range, ge=1e-9)
+        _check_range("sereega.ar_coefficient_range", self.ar_coefficient_range)
+        _check_range(
+            "sereega.background_amplitude_range",
+            self.background_amplitude_range,
+            ge=0.0,
+        )
+        return self
+
+
 class TVBBackendConfig(BaseModel):
     model: Literal["jansen_rit", "generic_2d_oscillator", "wilson_cowan"] = "jansen_rit"
     connectivity_scheme: str = "desikan_killiany"
@@ -180,6 +241,7 @@ class GenerationConfig(BaseModel):
     qc: QCConfig = Field(default_factory=QCConfig)
     writer: WriterConfig
     backend: Literal["sereega", "tvb"] = "sereega"
+    sereega: SEREEGABackendConfig = Field(default_factory=SEREEGABackendConfig)
     tvb: TVBBackendConfig = Field(default_factory=TVBBackendConfig)
     n_samples: int = Field(default=100_000, gt=0)
     n_workers: int = Field(default=4, gt=0)

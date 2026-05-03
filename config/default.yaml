@@ -24,7 +24,7 @@ montages:
 connectivity_bank:
   bank_dir: banks/connectivity
   schemes:
-    - desikan_killiany
+    - deepsif_994
 
 scenario_plan:
   prior_family_weights:
@@ -53,6 +53,7 @@ temporal:
     - oscillatory_burst
     - ar_correlated
     - spike_interictal
+  signal_family_weights: [0.25, 0.35, 0.20, 0.20]
 
 background:
   families:
@@ -91,6 +92,18 @@ writer:
   chunk_size: 256
 
 backend: sereega
+
+sereega:
+  erp_peak_count_weights:
+    1: 0.80
+    2: 0.20
+  latency_jitter_s_range: [0.05, 0.30]
+  amplitude_range: [0.5, 2.0]
+  erp_width_s_range: [0.02, 0.08]
+  burst_width_s_range: [0.10, 0.20]
+  ar_coefficient_range: [0.70, 0.97]
+  background_amplitude_range: [0.1, 0.1]
+
 tvb:
   model: jansen_rit
   connectivity_scheme: deepsif_994
@@ -102,6 +115,7 @@ tvb:
   reservoir_size: 100
   stimulus_amplitude: 1.0
   conduction_speed_mm_per_ms: 3.0
+
 n_samples: 100000
 n_workers: 4
 global_seed: 1234
