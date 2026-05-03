@@ -5,6 +5,47 @@ import pytest
 import scipy.sparse as sp
 
 
+class FakeMatlabBridge:
+    def __init__(self, _sereega_path):
+        pass
+
+    def generate_signal(self, signal_class, T: int, sfreq: float) -> np.ndarray:
+        params = signal_class["params"]
+        t = np.arange(T, dtype=np.float64) / sfreq
+        if signal_class["type"] == "erp":
+            sig = np.zeros(T, dtype=np.float64)
+            for latency_ms, width_ms, amplitude in zip(
+                params["peak_latencies_ms"],
+                params["peak_widths_ms"],
+                params["peak_amplitudes"],
+            ):
+                latency_s = float(latency_ms) / 1000.0
+                width_s = float(width_ms) / 1000.0
+                sig += float(amplitude) * np.exp(-0.5 * ((t - latency_s) / width_s) ** 2)
+            return sig.astype(np.float32)
+        if signal_class["type"] == "ersp":
+            center_s = float(params["mod_latency_ms"]) / 1000.0
+            width_s = float(params["mod_width_ms"]) / 1000.0
+            envelope = np.exp(-0.5 * ((t - center_s) / width_s) ** 2)
+            phase = 2.0 * np.pi * float(params["phase_cycles"])
+            return (
+                float(params["amplitude"])
+                * envelope
+                * np.sin(2.0 * np.pi * float(params["frequency_hz"]) * t + phase)
+            ).astype(np.float32)
+        rng = np.random.default_rng(int(params["seed"]))
+        sig = rng.standard_normal(T).astype(np.float32)
+        sig = sig / (float(np.std(sig)) + 1e-8)
+        return (float(params["amplitude"]) * sig).astype(np.float32)
+
+
+@pytest.fixture(autouse=True)
+def _fake_matlab_bridge(monkeypatch):
+    import synthgen.sources.sereega_backend as sereega_backend
+
+    monkeypatch.setattr(sereega_backend, "MatlabSereegaBridge", FakeMatlabBridge)
+
+
 def _make_config(tmp_path):
     import yaml
     cfg = {
@@ -88,6 +129,15 @@ def test_sampler_reproducible(tmp_path):
     assert sc1.scenario_id == sc2.scenario_id
     assert sc1.prior_family == sc2.prior_family
     assert sc1.n_sources == sc2.n_sources
+
+
+def test_sampler_respects_signal_family_weights(tmp_path):
+    from synthgen.scenario.sampler import ScenarioSampler
+    config = _make_config(tmp_path)
+    config.temporal.signal_family_weights = [1.0, 0.0, 0.0, 0.0]
+    sampler = ScenarioSampler(config)
+    families = [sampler.sample(np.random.default_rng(i)).signal_family for i in range(25)]
+    assert set(families) == {"erp"}
 
 
 def test_sampler_raises_if_no_core_montages(tmp_path):
@@ -280,6 +330,8 @@ def _make_bank_files(tmp_path, N: int = 20, C: int = 8, scheme: str = "desikan_k
 
 def _make_runner_config(tmp_path, N: int = 20, C: int = 8, n_samples: int = 3):
     import yaml
+    sereega_path = tmp_path / "SEREEGA"
+    sereega_path.mkdir(exist_ok=True)
     cfg = {
         "anatomy_bank": {"bank_dir": str(tmp_path / "anatomy"), "anatomy_ids": ["fsaverage"]},
         "leadfield_bank": {"bank_dir": str(tmp_path / "leadfield"), "conductivity_ids": ["standard"]},
@@ -291,6 +343,7 @@ def _make_runner_config(tmp_path, N: int = 20, C: int = 8, n_samples: int = 3):
         "n_samples": n_samples,
         "n_workers": 1,
         "global_seed": 42,
+        "sereega": {"matlab_sereega_path": str(sereega_path)},
     }
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml.dump(cfg))

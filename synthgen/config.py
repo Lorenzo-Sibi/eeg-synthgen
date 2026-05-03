@@ -186,15 +186,18 @@ def _check_weight_dict(name: str, weights: dict[int, float]) -> None:
 
 
 class SEREEGABackendConfig(BaseModel):
-    """Small set of knobs controlling SEREEGA-style waveform variability."""
+    """Small set of knobs controlling SEREEGA waveform variability."""
 
+    matlab_sereega_path: Path | None = None
     erp_peak_count_weights: dict[int, float] = Field(default_factory=lambda: {1: 1.0})
     latency_jitter_s_range: tuple[float, float] = (0.05, 0.30)
     amplitude_range: tuple[float, float] = (0.5, 2.0)
     erp_width_s_range: tuple[float, float] = (0.02, 0.08)
     burst_width_s_range: tuple[float, float] = (0.10, 0.20)
-    ar_coefficient_range: tuple[float, float] = (0.70, 0.97)
+    arm_order: int = Field(default=10, gt=0)
     background_amplitude_range: tuple[float, float] = (0.1, 0.1)
+    patch_spatial_profile: Literal["gaussian", "uniform"] = "gaussian"
+    patch_spatial_sigma_mm_range: tuple[float, float] = (12.0, 25.0)
 
     @model_validator(mode="after")
     def validate_ranges(self) -> SEREEGABackendConfig:
@@ -203,11 +206,15 @@ class SEREEGABackendConfig(BaseModel):
         _check_range("sereega.amplitude_range", self.amplitude_range, ge=0.0)
         _check_range("sereega.erp_width_s_range", self.erp_width_s_range, ge=1e-9)
         _check_range("sereega.burst_width_s_range", self.burst_width_s_range, ge=1e-9)
-        _check_range("sereega.ar_coefficient_range", self.ar_coefficient_range)
         _check_range(
             "sereega.background_amplitude_range",
             self.background_amplitude_range,
             ge=0.0,
+        )
+        _check_range(
+            "sereega.patch_spatial_sigma_mm_range",
+            self.patch_spatial_sigma_mm_range,
+            ge=1e-9,
         )
         return self
 

@@ -19,7 +19,7 @@ class ScenarioSampler:
     def __init__(self, config: GenerationConfig) -> None:
         self._config = config
         plan = config.scenario_plan
-        self._prior_families = list(plan.prior_family_weights.model_fields.keys())
+        self._prior_families = list(type(plan.prior_family_weights).model_fields.keys())
         self._prior_weights = [
             getattr(plan.prior_family_weights, f) for f in self._prior_families
         ]

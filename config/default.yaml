@@ -94,6 +94,7 @@ writer:
 backend: sereega
 
 sereega:
+  matlab_sereega_path: PATH_TO_SEREEGA
   erp_peak_count_weights:
     1: 0.80
     2: 0.20
@@ -101,8 +102,10 @@ sereega:
   amplitude_range: [0.5, 2.0]
   erp_width_s_range: [0.02, 0.08]
   burst_width_s_range: [0.10, 0.20]
-  ar_coefficient_range: [0.70, 0.97]
+  arm_order: 10
   background_amplitude_range: [0.1, 0.1]
+  patch_spatial_profile: gaussian
+  patch_spatial_sigma_mm_range: [12.0, 25.0]
 
 tvb:
   model: jansen_rit

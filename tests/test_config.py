@@ -7,6 +7,7 @@ from synthgen.config import (
     PriorFamilyWeights,
     NSourcesWeights,
     DifficultyWeights,
+    SEREEGABackendConfig,
     TemporalConfig,
 )
 
@@ -147,13 +148,13 @@ def test_tvb_config_from_yaml(tmp_path):
 
 
 def test_sereega_config_defaults_load():
-    from synthgen.config import SEREEGABackendConfig
-
     c = SEREEGABackendConfig()
+    assert c.matlab_sereega_path is None
     assert c.erp_peak_count_weights == {1: 1.0}
     assert c.latency_jitter_s_range == (0.05, 0.30)
     assert c.amplitude_range == (0.5, 2.0)
     assert c.background_amplitude_range == (0.1, 0.1)
+    assert c.patch_spatial_profile == "gaussian"
 
 
 def test_sereega_config_from_yaml(tmp_path):
@@ -165,17 +166,21 @@ def test_sereega_config_from_yaml(tmp_path):
         "montages": {"montages": []},
         "writer": {"output_dir": "out"},
         "sereega": {
+            "matlab_sereega_path": "external/SEREEGA",
             "erp_peak_count_weights": {1: 0.25, 2: 0.75},
             "amplitude_range": [2.0, 3.0],
             "background_amplitude_range": [0.05, 0.15],
+            "patch_spatial_profile": "uniform",
         },
     }
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml.dump(cfg_dict))
     cfg = GenerationConfig.from_yaml(p)
+    assert cfg.sereega.matlab_sereega_path == Path("external/SEREEGA")
     assert cfg.sereega.erp_peak_count_weights == {1: 0.25, 2: 0.75}
     assert cfg.sereega.amplitude_range == (2.0, 3.0)
     assert cfg.sereega.background_amplitude_range == (0.05, 0.15)
+    assert cfg.sereega.patch_spatial_profile == "uniform"
 
 
 def test_sereega_config_rejects_invalid_range(tmp_path):

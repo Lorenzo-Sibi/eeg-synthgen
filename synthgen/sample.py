@@ -38,6 +38,7 @@ class Scenario:
     source_correlation: float = 0.0
     temporal_onsets_s: list[float] = field(default_factory=list)
     dominant_frequencies_hz: list[float] = field(default_factory=list)
+    sereega_trial_parameters: list[dict] = field(default_factory=list)
 
     snir_db: float = 0.0
     snr_sensor_db: float = 0.0

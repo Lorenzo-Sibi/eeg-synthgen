@@ -6,15 +6,60 @@ import scipy.sparse as sp
 
 from synthgen.config import GenerationConfig
 from synthgen.sample import Scenario, SourceSpace
+from synthgen.sources.sereega_backend import SEREEGABackend
+
+
+class FakeMatlabBridge:
+    def __init__(self, _sereega_path):
+        pass
+
+    def generate_signal(self, signal_class, T: int, sfreq: float) -> np.ndarray:
+        params = signal_class["params"]
+        t = np.arange(T, dtype=np.float64) / sfreq
+        if signal_class["type"] == "erp":
+            sig = np.zeros(T, dtype=np.float64)
+            for latency_ms, width_ms, amplitude in zip(
+                params["peak_latencies_ms"],
+                params["peak_widths_ms"],
+                params["peak_amplitudes"],
+            ):
+                latency_s = float(latency_ms) / 1000.0
+                width_s = float(width_ms) / 1000.0
+                sig += float(amplitude) * np.exp(-0.5 * ((t - latency_s) / width_s) ** 2)
+            return sig.astype(np.float32)
+        if signal_class["type"] == "ersp":
+            center_s = float(params["mod_latency_ms"]) / 1000.0
+            width_s = float(params["mod_width_ms"]) / 1000.0
+            envelope = np.exp(-0.5 * ((t - center_s) / width_s) ** 2)
+            phase = 2.0 * np.pi * float(params["phase_cycles"])
+            return (
+                float(params["amplitude"])
+                * envelope
+                * np.sin(2.0 * np.pi * float(params["frequency_hz"]) * t + phase)
+            ).astype(np.float32)
+        rng = np.random.default_rng(int(params["seed"]))
+        sig = rng.standard_normal(T).astype(np.float32)
+        sig = sig / (float(np.std(sig)) + 1e-8)
+        return (float(params["amplitude"]) * sig).astype(np.float32)
+
+
+@pytest.fixture(autouse=True)
+def _fake_matlab_bridge(monkeypatch):
+    import synthgen.sources.sereega_backend as sereega_backend
+
+    monkeypatch.setattr(sereega_backend, "MatlabSereegaBridge", FakeMatlabBridge)
 
 
 def _make_config(tmp_path) -> GenerationConfig:
     import yaml
+    sereega_path = tmp_path / "SEREEGA"
+    sereega_path.mkdir(exist_ok=True)
     cfg = {
         "anatomy_bank": {"bank_dir": str(tmp_path / "anatomy")},
         "leadfield_bank": {"bank_dir": str(tmp_path / "leadfield")},
         "montages": {"montages": []},
         "writer": {"output_dir": str(tmp_path / "out")},
+        "sereega": {"matlab_sereega_path": str(sereega_path)},
     }
     p = tmp_path / "cfg.yaml"
     p.write_text(yaml.dump(cfg))
@@ -131,6 +176,7 @@ def test_sereega_backend_broadcasts_signal_across_patch(tmp_path):
     """Every vertex in seed_patch_vertex_indices[i] must carry the source signal."""
     from synthgen.sources.sereega_backend import SEREEGABackend
     config = _make_config(tmp_path)
+    config.sereega.patch_spatial_profile = "uniform"
     backend = SEREEGABackend(config)
     ss = _make_source_space(N=50)
     sc = _make_scenario(n_sources=2)
@@ -159,33 +205,45 @@ def test_sereega_backend_builds_component_per_seed():
     components = _scenario_components(sc)
 
     assert len(components) == 2
-    assert components[0].source == 0
-    assert components[0].patch == [0, 10, 11]
-    assert components[0].signal_classes[0].type == "oscillatory_burst"
-    assert components[0].signal_classes[0].params["freq_hz"] == 10.0
+    assert components[0]["source"] == 0
+    assert components[0]["patch"] == [0, 10, 11]
+    assert components[0]["signal_classes"][0]["type"] == "ersp"
+    assert components[0]["signal_classes"][0]["params"]["frequency_hz"] == 10.0
 
 
 def test_sereega_backend_sums_signal_classes():
     from synthgen.sources.sereega_backend import (
-        SereegaComponent,
-        SereegaSignalClass,
         _generate_component_activation,
-        _generate_signal,
     )
 
     T = 500
     sfreq = 500.0
     signal_classes = (
-        SereegaSignalClass("erp", {"freq_hz": 10.0, "onset_s": 0.0}),
-        SereegaSignalClass("spike_interictal", {"freq_hz": 2.0, "onset_s": 0.0}),
+        {
+            "type": "erp",
+            "params": {
+                "peak_latencies_ms": [100.0],
+                "peak_widths_ms": [20.0],
+                "peak_amplitudes": [1.0],
+                "seed": 1,
+            },
+        },
+        {
+            "type": "erp",
+            "params": {
+                "peak_latencies_ms": [200.0],
+                "peak_widths_ms": [30.0],
+                "peak_amplitudes": [0.5],
+                "seed": 2,
+            },
+        },
     )
-    component = SereegaComponent(source=0, patch=[0], signal_classes=signal_classes)
+    component = {"source": 0, "patch": [0], "signal_classes": signal_classes}
 
-    rng_component = np.random.default_rng(123)
-    rng_manual = np.random.default_rng(123)
-    combined = _generate_component_activation(component, T, sfreq, rng_component)
+    bridge = FakeMatlabBridge(None)
+    combined = _generate_component_activation(component, T, sfreq, bridge)
     manual = sum(
-        (_generate_signal(signal_class, T, sfreq, rng_manual) for signal_class in signal_classes),
+        (bridge.generate_signal(signal_class, T, sfreq) for signal_class in signal_classes),
         start=np.zeros(T, dtype=np.float32),
     )
 
@@ -200,6 +258,7 @@ def test_sereega_backend_sums_overlapping_components(tmp_path):
     )
 
     config = _make_config(tmp_path)
+    config.sereega.patch_spatial_profile = "uniform"
     backend = SEREEGABackend(config)
     ss = _make_source_space(N=20)
 
@@ -208,12 +267,18 @@ def test_sereega_backend_sums_overlapping_components(tmp_path):
     src_overlap, _ = backend.generate(sc_overlap, ss, np.random.default_rng(9))
 
     rng_manual = np.random.default_rng(9)
-    components = _scenario_components(sc_overlap)
+    components = _scenario_components(sc_overlap, config.sereega, rng_manual)
     act0 = _generate_component_activation(
-        components[0], config.temporal.n_samples_per_window, config.temporal.sfreq, rng_manual
+        components[0],
+        config.temporal.n_samples_per_window,
+        config.temporal.sfreq,
+        FakeMatlabBridge(None),
     )
     act1 = _generate_component_activation(
-        components[1], config.temporal.n_samples_per_window, config.temporal.sfreq, rng_manual
+        components[1],
+        config.temporal.n_samples_per_window,
+        config.temporal.sfreq,
+        FakeMatlabBridge(None),
     )
 
     np.testing.assert_allclose(src_overlap[5], act0 + act1, atol=1e-6)
@@ -248,3 +313,53 @@ def test_sereega_backend_uses_configured_background_amplitude(tmp_path):
     _, bg = backend.generate(sc, ss, np.random.default_rng(0))
 
     np.testing.assert_allclose(np.std(bg, axis=1), 0.25, atol=1e-5)
+
+
+def test_sereega_backend_records_trial_by_trial_parameters(tmp_path):
+    config = _make_config(tmp_path)
+    backend = SEREEGABackend(config)
+    ss = _make_source_space(N=20)
+    sc = _make_scenario(n_sources=1, signal_family="oscillatory_burst")
+
+    backend.generate(sc, ss, np.random.default_rng(0))
+
+    params = sc.sereega_trial_parameters[0]
+    assert params["source"] == 0
+    assert params["patch_size"] == 1
+    assert params["signal_classes"][0]["type"] == "ersp"
+    assert "mod_latency_ms" in params["signal_classes"][0]["params"]
+    assert params["spatial"]["profile"] == "gaussian"
+
+
+def test_sereega_backend_gaussian_patch_weights_decay_with_distance(tmp_path):
+    config = _make_config(tmp_path)
+    config.sereega.patch_spatial_profile = "gaussian"
+    config.sereega.patch_spatial_sigma_mm_range = (10.0, 10.0)
+    config.sereega.erp_peak_count_weights = {1: 1.0}
+    config.sereega.latency_jitter_s_range = (0.10, 0.10)
+    config.sereega.erp_width_s_range = (0.02, 0.02)
+    config.sereega.amplitude_range = (1.0, 1.0)
+    backend = SEREEGABackend(config)
+    ss = _make_source_space(N=3)
+    ss.vertex_coords = np.array(
+        [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [30.0, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    sc = _make_scenario(n_sources=1, signal_family="erp")
+    sc.seed_patch_vertex_indices = [[0, 1, 2]]
+
+    src, _ = backend.generate(sc, ss, np.random.default_rng(0))
+
+    peak_idx = int(0.10 * config.temporal.sfreq)
+    assert abs(src[0, peak_idx]) > abs(src[1, peak_idx]) > abs(src[2, peak_idx])
+    spatial = sc.sereega_trial_parameters[0]["spatial"]
+    assert spatial["sigma_mm"] == pytest.approx(10.0)
+    assert spatial["weight_max"] == pytest.approx(1.0)
+
+
+def test_sereega_backend_requires_matlab_path(tmp_path):
+    config = _make_config(tmp_path)
+    config.sereega.matlab_sereega_path = None
+
+    with pytest.raises(RuntimeError, match="matlab_sereega_path"):
+        SEREEGABackend(config)

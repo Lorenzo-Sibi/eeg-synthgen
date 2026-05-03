@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 /banks/*
+reports/
 .eggs/
 .pytest_cache/
 .coverage
