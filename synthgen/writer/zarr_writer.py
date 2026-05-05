@@ -50,6 +50,7 @@ class ZarrWriter(DatasetWriter):
         cs = self._chunk_size
         grp = self._store.create_group(key)
         grp.create_array("eeg", shape=(0, C, T), dtype="float32", chunks=(cs, C, T))
+        grp.create_array("source_activity", shape=(0, V, T), dtype="float32", chunks=(cs, V, T))
         grp.create_array("source_support", shape=(0, V), dtype="bool", chunks=(cs, V))
         grp.create_array("snir_db", shape=(0,), dtype="float32", chunks=(cs,))
         grp.create_array("snr_sensor_db", shape=(0,), dtype="float32", chunks=(cs,))
@@ -70,9 +71,10 @@ class ZarrWriter(DatasetWriter):
         grp = self._store[key]
 
         eeg_batch = np.stack([s.eeg for s in buf])
+        act_batch = np.stack([s.source_activity for s in buf])
         sup_batch = np.stack([s.source_support for s in buf])
 
-        for arr_name, batch in [("eeg", eeg_batch), ("source_support", sup_batch)]:
+        for arr_name, batch in [("eeg", eeg_batch), ("source_activity", act_batch), ("source_support", sup_batch)]:
             arr = grp[arr_name]
             new_shape = (n0 + n, *arr.shape[1:])
             arr.resize(new_shape)
