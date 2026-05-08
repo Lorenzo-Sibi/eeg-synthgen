@@ -87,7 +87,6 @@ def test_sampler_fields_populated(tmp_path):
     assert sc.prior_family in ["local_contiguous", "network_aware", "state_dependent",
                                 "broad_random", "tvb_stub"]
     assert sc.n_sources >= 1
-    assert sc.difficulty in ["easy", "medium", "hard"]
     assert sc.signal_family in config.temporal.signal_families
     assert sc.split in ["train", "ood"]
     assert sc.leadfield_id == f"{sc.anatomy_id}__{sc.montage_id}__standard"
@@ -189,7 +188,6 @@ def _make_eeg_sample(
         prior_family="broad_random",
         n_sources=1,
         signal_family="erp",
-        difficulty="easy",
         split="train",
     )
     sc.snir_db = 10.0

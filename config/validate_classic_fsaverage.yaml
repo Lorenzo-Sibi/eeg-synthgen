@@ -1,0 +1,98 @@
+anatomy_bank:
+  bank_dir: banks/anatomy
+  anatomy_ids:
+    - fsaverage
+  parcellation_scheme: deepsif_994
+
+leadfield_bank:
+  bank_dir: banks/leadfield
+  conductivity_ids:
+    - standard
+
+montages:
+  montages:
+    - {name: standard_1005_32,  n_channels: 32,  split_role: core}
+    - {name: standard_1005_64,  n_channels: 64,  split_role: core}
+    - {name: standard_1005_76,  n_channels: 76,  split_role: core}
+    - {name: standard_1005_90,  n_channels: 90,  split_role: core}
+    - {name: standard_1005_128, n_channels: 128, split_role: core}
+    - {name: standard_1005_256, n_channels: 256, split_role: core}
+
+connectivity_bank:
+  bank_dir: banks/connectivity
+  schemes:
+    - deepsif_994
+
+scenario_plan:
+  prior_family_weights:
+    local_contiguous: 0.30
+    network_aware:    0.25
+    state_dependent:  0.20
+    broad_random:     0.25
+    tvb_stub:         0.00
+  n_sources_weights:
+    weights:
+      1: 0.20
+      2: 0.25
+      3: 0.30
+      4: 0.25
+
+temporal:
+  sfreq: 500.0  # in Hz
+  window_s: 1.0 # in seconds
+  signal_families:
+    - erp
+    - oscillatory_burst
+    - ar_correlated
+    - spike_interictal
+  signal_family_weights: [1.00, 0.00, 0.00, 0.00]
+
+background:
+  families:
+    - colored_1f
+  weights: [1.0]
+
+noise:
+  families:
+    - white_gaussian
+  weights: [1.0]
+  snir_levels_db:        [0.0, 5.0, 10.0, 15.0, 20.0]
+  snr_sensor_levels_db:  [0.0, 5.0, 10.0, 15.0, 20.0]
+
+artifacts:
+  families:
+    - ocular
+    - muscular
+    - line_noise
+    - bad_channel_dropout
+  artifact_prob: 0.30
+
+reference:
+  scheme: average
+
+qc:
+  min_valid_channels: 10
+  max_snir_deviation_db: 5.0
+  min_inter_source_distance_mm: 10.0
+
+writer:
+  output_dir: data/validate_classic
+  chunk_size: 64
+
+backend: sereega
+
+sereega:
+  matlab_sereega_path: /home/lorenzo/SEREEGA
+  erp_peak_count_weights:
+    1: 0.80
+    2: 0.20
+  latency_jitter_s_range: [0.05, 0.30]
+  erp_width_s_range: [0.02, 0.08]
+  burst_width_s_range: [0.10, 0.20]
+  arm_order: 10
+  patch_spatial_profile: gaussian
+  patch_spatial_sigma_mm_range: [12.0, 25.0]
+
+n_samples: 200
+n_workers: 4
+global_seed: 1234

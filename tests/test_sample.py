@@ -18,7 +18,6 @@ def _make_scenario(**kwargs) -> Scenario:
         prior_family="local_contiguous",
         n_sources=1,
         signal_family="erp",
-        difficulty="easy",
         split="train",
     )
     defaults.update(kwargs)

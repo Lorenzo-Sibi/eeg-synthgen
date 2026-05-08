@@ -6,7 +6,6 @@ from synthgen.config import (
     ScenarioPlanConfig,
     PriorFamilyWeights,
     NSourcesWeights,
-    DifficultyWeights,
     SEREEGABackendConfig,
     TemporalConfig,
 )
@@ -27,11 +26,6 @@ def test_prior_family_weights_sum_to_one():
 def test_n_sources_weights_sum_to_one():
     w = NSourcesWeights()
     assert abs(sum(w.weights.values()) - 1.0) < 1e-6
-
-
-def test_difficulty_weights_sum_to_one():
-    w = DifficultyWeights()
-    assert abs(w.easy + w.medium + w.hard - 1.0) < 1e-6
 
 
 def test_temporal_config_defaults():
@@ -152,8 +146,6 @@ def test_sereega_config_defaults_load():
     assert c.matlab_sereega_path is None
     assert c.erp_peak_count_weights == {1: 1.0}
     assert c.latency_jitter_s_range == (0.05, 0.30)
-    assert c.amplitude_range == (0.5, 2.0)
-    assert c.background_amplitude_range == (0.1, 0.1)
     assert c.patch_spatial_profile == "gaussian"
 
 
@@ -168,8 +160,6 @@ def test_sereega_config_from_yaml(tmp_path):
         "sereega": {
             "matlab_sereega_path": "external/SEREEGA",
             "erp_peak_count_weights": {1: 0.25, 2: 0.75},
-            "amplitude_range": [2.0, 3.0],
-            "background_amplitude_range": [0.05, 0.15],
             "patch_spatial_profile": "uniform",
         },
     }
@@ -178,9 +168,24 @@ def test_sereega_config_from_yaml(tmp_path):
     cfg = GenerationConfig.from_yaml(p)
     assert cfg.sereega.matlab_sereega_path == Path("external/SEREEGA")
     assert cfg.sereega.erp_peak_count_weights == {1: 0.25, 2: 0.75}
-    assert cfg.sereega.amplitude_range == (2.0, 3.0)
-    assert cfg.sereega.background_amplitude_range == (0.05, 0.15)
     assert cfg.sereega.patch_spatial_profile == "uniform"
+
+
+def test_noise_config_defaults():
+    from synthgen.config import NoiseConfig
+
+    c = NoiseConfig()
+    assert c.snir_levels_db == [0.0, 5.0, 10.0, 15.0, 20.0]
+    assert c.snr_sensor_levels_db == [0.0, 5.0, 10.0, 15.0, 20.0]
+
+
+def test_noise_config_rejects_empty_levels():
+    from synthgen.config import NoiseConfig
+
+    with pytest.raises(ValidationError):
+        NoiseConfig(snir_levels_db=[])
+    with pytest.raises(ValidationError):
+        NoiseConfig(snr_sensor_levels_db=[])
 
 
 def test_sereega_config_rejects_invalid_range(tmp_path):

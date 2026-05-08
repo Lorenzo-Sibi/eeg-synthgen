@@ -69,7 +69,7 @@ def _scenario(seeds):
         scenario_id="s", seed=0, anatomy_id="a", leadfield_id="l",
         montage_id="m", reference_scheme="average", conductivity_id="standard",
         prior_family="broad_random", n_sources=len(seeds),
-        signal_family="erp", difficulty="easy", split="train",
+        signal_family="erp", split="train",
         seed_vertex_indices=list(seeds),
         temporal_onsets_s=[0.05] * len(seeds),
         dominant_frequencies_hz=[10.0] * len(seeds),

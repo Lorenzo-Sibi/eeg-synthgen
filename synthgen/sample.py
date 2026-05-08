@@ -28,7 +28,6 @@ class Scenario:
     prior_family: str
     n_sources: int
     signal_family: str
-    difficulty: str
     split: str
 
     patch_extents_cm2: list[float] = field(default_factory=list)

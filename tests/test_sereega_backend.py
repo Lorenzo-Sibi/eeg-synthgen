@@ -90,7 +90,6 @@ def _make_scenario(n_sources: int = 2, signal_family: str = "erp") -> Scenario:
         prior_family="broad_random",
         n_sources=n_sources,
         signal_family=signal_family,
-        difficulty="easy",
         split="train",
     )
     sc.seed_vertex_indices = list(range(n_sources))
@@ -284,14 +283,16 @@ def test_sereega_backend_sums_overlapping_components(tmp_path):
     np.testing.assert_allclose(src_overlap[5], act0 + act1, atol=1e-6)
 
 
-def test_sereega_backend_uses_configured_erp_ranges(tmp_path):
-    from synthgen.sources.sereega_backend import SEREEGABackend
+def test_sereega_backend_emits_canonical_amplitude(tmp_path):
+    from synthgen.sources.sereega_backend import (
+        SEREEGABackend,
+        _CANONICAL_AMPLITUDE_UV,
+    )
 
     config = _make_config(tmp_path)
     config.sereega.erp_peak_count_weights = {1: 1.0}
     config.sereega.latency_jitter_s_range = (0.10, 0.10)
     config.sereega.erp_width_s_range = (0.05, 0.05)
-    config.sereega.amplitude_range = (7.0, 7.0)
 
     backend = SEREEGABackend(config)
     ss = _make_source_space(N=20)
@@ -299,20 +300,24 @@ def test_sereega_backend_uses_configured_erp_ranges(tmp_path):
     src, _ = backend.generate(sc, ss, np.random.default_rng(0))
 
     peak_idx = int(0.10 * config.temporal.sfreq)
-    assert src[0, peak_idx] == pytest.approx(7.0, abs=1e-6)
+    assert src[0, peak_idx] == pytest.approx(_CANONICAL_AMPLITUDE_UV, abs=1e-6)
 
 
-def test_sereega_backend_uses_configured_background_amplitude(tmp_path):
-    from synthgen.sources.sereega_backend import SEREEGABackend
+def test_sereega_backend_emits_canonical_background_amplitude(tmp_path):
+    from synthgen.sources.sereega_backend import (
+        SEREEGABackend,
+        _CANONICAL_BACKGROUND_AMPLITUDE_UV,
+    )
 
     config = _make_config(tmp_path)
-    config.sereega.background_amplitude_range = (0.25, 0.25)
     backend = SEREEGABackend(config)
     ss = _make_source_space(N=20)
     sc = _make_scenario(n_sources=1)
     _, bg = backend.generate(sc, ss, np.random.default_rng(0))
 
-    np.testing.assert_allclose(np.std(bg, axis=1), 0.25, atol=1e-5)
+    np.testing.assert_allclose(
+        np.std(bg, axis=1), _CANONICAL_BACKGROUND_AMPLITUDE_UV, atol=1e-5
+    )
 
 
 def test_sereega_backend_records_trial_by_trial_parameters(tmp_path):
@@ -338,7 +343,6 @@ def test_sereega_backend_gaussian_patch_weights_decay_with_distance(tmp_path):
     config.sereega.erp_peak_count_weights = {1: 1.0}
     config.sereega.latency_jitter_s_range = (0.10, 0.10)
     config.sereega.erp_width_s_range = (0.02, 0.02)
-    config.sereega.amplitude_range = (1.0, 1.0)
     backend = SEREEGABackend(config)
     ss = _make_source_space(N=3)
     ss.vertex_coords = np.array(

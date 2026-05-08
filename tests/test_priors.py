@@ -37,7 +37,6 @@ def _make_scenario(**kwargs) -> Scenario:
         prior_family="broad_random",
         n_sources=2,
         signal_family="erp",
-        difficulty="easy",
         split="train",
     )
     defaults.update(kwargs)
@@ -176,7 +175,7 @@ def test_local_contiguous_fills_all_fields():
     from synthgen.sources.priors.local_contiguous import LocalContiguousPrior
     rng = np.random.default_rng(0)
     ss = _make_source_space(N=100)
-    sc = _make_scenario(n_sources=2, difficulty="easy")
+    sc = _make_scenario(n_sources=2)
     prior = LocalContiguousPrior()
     sc = prior.sample(sc, ss, rng)
     assert len(sc.seed_vertex_indices) == 2
@@ -197,19 +196,19 @@ def test_local_contiguous_seed_indices_in_range():
     assert all(0 <= idx < 200 for idx in sc.seed_vertex_indices)
 
 
-def test_local_contiguous_patch_extents_easy_larger_than_hard():
-    from synthgen.sources.priors.local_contiguous import LocalContiguousPrior
+def test_local_contiguous_patch_extents_within_range():
+    from synthgen.sources.priors.local_contiguous import (
+        LocalContiguousPrior,
+        _EXTENT_CM2_RANGE,
+    )
     ss = _make_source_space(N=100)
     prior = LocalContiguousPrior()
-    easy_extents = [
-        prior.sample(_make_scenario(n_sources=1, difficulty="easy"), ss, np.random.default_rng(i)).patch_extents_cm2[0]
+    extents = [
+        prior.sample(_make_scenario(n_sources=1), ss, np.random.default_rng(i)).patch_extents_cm2[0]
         for i in range(30)
     ]
-    hard_extents = [
-        prior.sample(_make_scenario(n_sources=1, difficulty="hard"), ss, np.random.default_rng(i + 1000)).patch_extents_cm2[0]
-        for i in range(30)
-    ]
-    assert np.mean(easy_extents) > np.mean(hard_extents)
+    lo, hi = _EXTENT_CM2_RANGE
+    assert all(lo <= e <= hi for e in extents)
 
 
 def test_local_contiguous_correlation_low():

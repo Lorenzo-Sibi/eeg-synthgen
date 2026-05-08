@@ -18,7 +18,6 @@ def _make_scenario(snr_db: float = 10.0) -> Scenario:
         prior_family="broad_random",
         n_sources=2,
         signal_family="erp",
-        difficulty="easy",
         split="train",
     )
     sc.snr_sensor_db = snr_db

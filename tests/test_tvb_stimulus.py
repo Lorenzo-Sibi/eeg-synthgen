@@ -12,7 +12,7 @@ def _scenario(family, seeds=None, onsets=(0.1,), freqs=(10.0,)):
         scenario_id="s", seed=0, anatomy_id="a", leadfield_id="l",
         montage_id="m", reference_scheme="average", conductivity_id="standard",
         prior_family="broad_random", n_sources=1, signal_family=family,
-        difficulty="easy", split="train",
+        split="train",
         seed_vertex_indices=list(seeds),
         temporal_onsets_s=list(onsets),
         dominant_frequencies_hz=list(freqs),

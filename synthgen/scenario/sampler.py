@@ -26,9 +26,6 @@ class ScenarioSampler:
         ns = plan.n_sources_weights.weights
         self._n_sources_keys = [int(k) for k in ns.keys()]
         self._n_sources_weights = list(ns.values())
-        dw = plan.difficulty_weights
-        self._difficulties = ["easy", "medium", "hard"]
-        self._difficulty_weights = [dw.easy, dw.medium, dw.hard]
         self._ood_fraction = plan.ood_fraction
         self._core_montages = [m for m in config.montages.montages if m.split_role == "core"]
         if not self._core_montages:
@@ -61,7 +58,6 @@ class ScenarioSampler:
             self._n_sources_weights,
             rng,
         ))
-        difficulty = _weighted_choice(self._difficulties, self._difficulty_weights, rng)
         if self._signal_family_weights is None:
             signal_family = str(
                 self._signal_families[int(rng.integers(0, len(self._signal_families)))]
@@ -86,6 +82,5 @@ class ScenarioSampler:
             prior_family=prior_family,
             n_sources=n_sources,
             signal_family=signal_family,
-            difficulty=difficulty,
             split=split,
         )
