@@ -16,7 +16,8 @@ dependencies = [
     "zarr>=2.16",
     "pyyaml>=6.0",
     "tqdm>=4.65",
-    "nibabel>=5.4.2"
+    "nibabel>=5.4.2",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
