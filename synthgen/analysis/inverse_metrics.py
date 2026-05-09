@@ -102,3 +102,52 @@ def localization_error(
         "pred_seed_indices": pred_seed_indices,
         "t_eval_gt_indices": t_eval_gt_indices,
     }
+
+
+def time_error(
+    j_true: np.ndarray,
+    j_hat: np.ndarray,
+    seed_indices: np.ndarray,
+    adjacency,
+    sfreq: float,
+    patch_order: int = 2,
+) -> dict:
+    """Time error per Reynaud et al. (sec. 2.2.4).
+
+    TE_s = |t_eval_gt - t_eval_pred| converted from samples to ms.
+    t_eval_pred = argmax_t |j_hat[s_hat, :]| where s_hat is the eval-zone
+    argmax used by `localization_error`.
+    """
+    j_true = np.asarray(j_true, dtype=float)
+    j_hat = np.asarray(j_hat, dtype=float)
+    seed_indices = np.atleast_1d(np.asarray(seed_indices, dtype=int))
+    if seed_indices.size == 0:
+        raise ValueError("seed_indices is empty; at least one seed is required")
+    if j_true.shape != j_hat.shape or j_true.ndim != 2:
+        raise ValueError(
+            f"j_true and j_hat must both have shape (V, T); got {j_true.shape}, {j_hat.shape}"
+        )
+    if sfreq <= 0:
+        raise ValueError(f"sfreq must be positive, got {sfreq}")
+
+    te_values: list[float] = []
+    t_eval_gt_indices: list[int] = []
+    t_eval_pred_indices: list[int] = []
+    sample_period_ms = 1000.0 / float(sfreq)
+
+    for seed_idx in seed_indices:
+        seed_idx = int(seed_idx)
+        t_gt = int(np.argmax(np.abs(j_true[seed_idx, :])))
+        eval_zone = get_patch(seed_idx, adjacency, order=patch_order)
+        s_hat = int(eval_zone[np.argmax(np.abs(j_hat[eval_zone, t_gt]))])
+        t_pred = int(np.argmax(np.abs(j_hat[s_hat, :])))
+        te_values.append(abs(t_gt - t_pred) * sample_period_ms)
+        t_eval_gt_indices.append(t_gt)
+        t_eval_pred_indices.append(t_pred)
+
+    return {
+        "te_ms_mean": float(np.mean(te_values)),
+        "per_seed_te_ms": te_values,
+        "t_eval_gt_indices": t_eval_gt_indices,
+        "t_eval_pred_indices": t_eval_pred_indices,
+    }

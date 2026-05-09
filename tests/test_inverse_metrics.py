@@ -133,3 +133,77 @@ def test_le_empty_seed_indices_raises():
     j_hat = np.zeros((5, 10))
     with pytest.raises(ValueError, match="seed_indices is empty"):
         localization_error(j_true, j_hat, np.array([], dtype=int), coords, adj)
+
+
+from synthgen.analysis.inverse_metrics import time_error
+
+
+def test_te_perfect_estimate_is_zero():
+    adj, coords = _two_seed_setup()
+    j_true = np.zeros((5, 10))
+    j_true[0, 5] = 1.0
+    j_hat = j_true.copy()
+    out = time_error(j_true, j_hat, np.array([0]), adj, sfreq=500.0, patch_order=1)
+    assert out["te_ms_mean"] == 0.0
+
+
+def test_te_uses_t_eval_pred_at_s_hat():
+    """t_eval_pred = argmax over time of |j_hat[s_hat, :]|, where s_hat
+    is determined by the LE eval-zone rule (argmax at t_eval_gt within
+    the local patch around the seed)."""
+    adj, coords = _two_seed_setup()
+    j_true = np.zeros((5, 20))
+    j_true[0, 10] = 1.0    # gt peak at t=10
+    j_hat = np.zeros((5, 20))
+    j_hat[1, 10] = 0.5     # non-zero at t_gt so eval-zone argmax picks vertex 1
+    j_hat[1, 5] = 1.0      # vertex 1's own temporal peak is at t=5
+    out = time_error(j_true, j_hat, np.array([0]), adj, sfreq=1000.0, patch_order=1)
+    # s_hat = 1 (eval-zone winner at t_gt=10), t_eval_pred = 5
+    # |10 - 5| samples at sfreq=1000 → 5 ms
+    assert out["te_ms_mean"] == 5.0
+    assert out["t_eval_pred_indices"] == [5]
+
+
+def test_te_multi_seed_averages():
+    adj, coords = _two_seed_setup()
+    j_true = np.zeros((5, 10))
+    j_true[0, 0] = 1.0
+    j_true[4, 9] = 1.0
+    j_hat = j_true.copy()
+    out = time_error(j_true, j_hat, np.array([0, 4]), adj, sfreq=1000.0, patch_order=1)
+    assert out["te_ms_mean"] == 0.0
+
+
+from synthgen.analysis.inverse_metrics import normalized_mse
+
+
+def test_nmse_identical_signals_is_zero():
+    adj, coords = _two_seed_setup()
+    j_true = np.zeros((5, 10))
+    j_true[2, 5] = 1.0
+    j_hat = j_true.copy()
+    out = normalized_mse(j_true, j_hat, np.array([2]), adj, patch_order=1)
+    assert out["nmse_mean"] == 0.0
+
+
+def test_nmse_invariant_to_global_scaling():
+    adj, coords = _two_seed_setup()
+    j_true = np.zeros((5, 10))
+    j_true[2, :] = np.array([0, 0, 0, 0, 0, 1, 0.5, 0.2, 0, 0])
+    j_hat = 1000.0 * j_true  # huge global scaling — should not matter
+    out = normalized_mse(j_true, j_hat, np.array([2]), adj, patch_order=1)
+    assert out["nmse_mean"] < 1e-10
+
+
+def test_nmse_sign_flip_gives_max():
+    """Sign-flipped pred at the peak time → nMSE per-element is (1 - (-1))^2 = 4
+    averaged over V vertices where only the peak vertex is non-zero on both
+    sides → 4/V plus zeros from other vertices."""
+    adj, coords = _two_seed_setup()
+    V, T = 5, 10
+    j_true = np.zeros((V, T))
+    j_true[2, 5] = 1.0
+    j_hat = -j_true
+    out = normalized_mse(j_true, j_hat, np.array([2]), adj, patch_order=1)
+    expected = (2.0 ** 2) / V  # one vertex contributes (1 - (-1))^2 = 4; others 0
+    assert np.isclose(out["nmse_mean"], expected)
