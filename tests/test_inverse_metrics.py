@@ -207,3 +207,123 @@ def test_nmse_sign_flip_gives_max():
     out = normalized_mse(j_true, j_hat, np.array([2]), adj, patch_order=1)
     expected = (2.0 ** 2) / V  # one vertex contributes (1 - (-1))^2 = 4; others 0
     assert np.isclose(out["nmse_mean"], expected)
+
+
+from synthgen.analysis.inverse_metrics import psnr_temporal
+
+
+def test_psnr_identical_signals_is_inf():
+    j_true = np.random.RandomState(0).randn(5, 10)
+    psnr_value = psnr_temporal(j_true, j_true.copy())
+    assert np.isposinf(psnr_value)
+
+
+def test_psnr_finite_for_distinct_signals():
+    rng = np.random.RandomState(0)
+    j_true = rng.randn(5, 10)
+    j_hat = j_true + 0.1 * rng.randn(5, 10)
+    psnr_value = psnr_temporal(j_true, j_hat)
+    assert np.isfinite(psnr_value)
+    assert psnr_value > 0
+
+
+def test_psnr_shape_check():
+    with pytest.raises(ValueError, match="shape"):
+        psnr_temporal(np.zeros((5,)), np.zeros((5, 10)))
+
+
+from synthgen.analysis.inverse_metrics import auc_at_peak
+
+
+def test_auc_perfect_classifier_is_one():
+    """Score is high inside support, zero outside → AUC = 1."""
+    adj, coords = _two_seed_setup()
+    V, T = 5, 10
+    support = np.array([True, True, False, False, False])
+    j_hat = np.zeros((V, T))
+    j_hat[0, 5] = 5.0
+    j_hat[1, 5] = 4.0
+    # outside support stays 0
+    j_true = np.zeros((V, T))
+    j_true[0, 5] = 1.0
+    out = auc_at_peak(
+        j_hat=j_hat,
+        support=support,
+        seed_indices=np.array([0]),
+        j_true=j_true,
+        adjacency=adj,
+        patch_order=1,
+    )
+    assert out["auc_mean"] == 1.0
+
+
+def test_auc_uniform_score_is_half():
+    adj, coords = _two_seed_setup()
+    V, T = 5, 10
+    support = np.array([True, True, False, False, False])
+    j_hat = np.ones((V, T))
+    j_true = np.zeros((V, T))
+    j_true[0, 5] = 1.0
+    out = auc_at_peak(
+        j_hat=j_hat,
+        support=support,
+        seed_indices=np.array([0]),
+        j_true=j_true,
+        adjacency=adj,
+        patch_order=1,
+    )
+    assert out["auc_mean"] == 0.5
+
+
+def test_auc_returns_nan_for_degenerate_support():
+    adj, coords = _two_seed_setup()
+    V, T = 5, 10
+    support = np.zeros(V, dtype=bool)
+    j_hat = np.random.RandomState(0).randn(V, T)
+    j_true = np.zeros((V, T))
+    j_true[0, 5] = 1.0
+    out = auc_at_peak(
+        j_hat=j_hat,
+        support=support,
+        seed_indices=np.array([0]),
+        j_true=j_true,
+        adjacency=adj,
+        patch_order=1,
+    )
+    assert np.isnan(out["auc_mean"])
+
+
+from synthgen.analysis.inverse_metrics import compute_all_metrics
+
+
+def test_compute_all_metrics_aggregates_keys():
+    adj, coords = _two_seed_setup()
+    V, T = 5, 20
+    support = np.array([True, True, False, False, False])
+    # Activate the whole support equally; j_hat = j_true so all 5 metrics
+    # land on their best deterministic values (LE=TE=nMSE=0, PSNR=inf, AUC=1).
+    j_true = np.zeros((V, T))
+    j_true[support, 10] = 1.0
+    j_hat = j_true.copy()
+    out = compute_all_metrics(
+        j_true=j_true,
+        j_hat=j_hat,
+        seed_indices=np.array([0]),
+        support=support,
+        coords_mm=coords,
+        adjacency=adj,
+        sfreq=500.0,
+        patch_order=1,
+    )
+    expected_keys = {
+        "le_mm", "te_ms", "nmse", "psnr_db", "auc",
+        "per_seed_le_mm", "per_seed_te_ms", "per_seed_nmse", "per_seed_auc",
+        "true_seed_indices", "pred_seed_indices",
+        "t_eval_gt_indices", "t_eval_pred_indices",
+    }
+    assert expected_keys.issubset(out.keys())
+    assert out["le_mm"] == 0.0
+    assert out["te_ms"] == 0.0
+    assert out["nmse"] == 0.0
+    assert np.isposinf(out["psnr_db"])
+    assert out["auc"] == 1.0

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from sklearn.metrics import roc_auc_score
 
 
 @dataclass(frozen=True)
@@ -150,4 +151,170 @@ def time_error(
         "per_seed_te_ms": te_values,
         "t_eval_gt_indices": t_eval_gt_indices,
         "t_eval_pred_indices": t_eval_pred_indices,
+    }
+
+
+def normalized_mse(
+    j_true: np.ndarray,
+    j_hat: np.ndarray,
+    seed_indices: np.ndarray,
+    adjacency,
+    patch_order: int = 2,
+) -> dict:
+    """nMSE per Reynaud et al. (eq. 8) at t_eval_gt for each seed.
+
+        nmse_s = mean_v ( j_true[v, t]/|j_true[:, t]|.max()
+                         - j_hat[v, t]/|j_hat[:, t]|.max() )^2
+
+    Mean over seeds. Zero-protected divisions: if the per-time-slice max
+    of either signal is zero, that seed contributes NaN.
+    """
+    j_true = np.asarray(j_true, dtype=float)
+    j_hat = np.asarray(j_hat, dtype=float)
+    seed_indices = np.atleast_1d(np.asarray(seed_indices, dtype=int))
+    if seed_indices.size == 0:
+        raise ValueError("seed_indices is empty; at least one seed is required")
+    if j_true.shape != j_hat.shape or j_true.ndim != 2:
+        raise ValueError(
+            f"j_true and j_hat must both have shape (V, T); got {j_true.shape}, {j_hat.shape}"
+        )
+
+    nmse_values: list[float] = []
+    for seed_idx in seed_indices:
+        seed_idx = int(seed_idx)
+        t_gt = int(np.argmax(np.abs(j_true[seed_idx, :])))
+        true_slice = j_true[:, t_gt]
+        hat_slice = j_hat[:, t_gt]
+        true_max = np.abs(true_slice).max()
+        hat_max = np.abs(hat_slice).max()
+        if true_max == 0 or hat_max == 0:
+            nmse_values.append(float("nan"))
+            continue
+        diff = (true_slice / true_max) - (hat_slice / hat_max)
+        nmse_values.append(float(np.mean(diff ** 2)))
+    return {
+        "nmse_mean": float(np.nanmean(nmse_values)),
+        "per_seed_nmse": nmse_values,
+    }
+
+
+def psnr_temporal(j_true: np.ndarray, j_hat: np.ndarray) -> float:
+    """PSNR over the entire (V, T) tensor per Reynaud et al. (eq. 9).
+
+    Both signals are normalized by their max-abs (so values lie in
+    [-1, 1]); data_range is fixed at 2.0. Equivalent to:
+
+        PSNR = 10 * log10(MAX^2 / MSE)
+
+    with MAX = 2.0 and MSE computed over all (V, T) entries of the
+    normalized arrays.
+    """
+    j_true = np.asarray(j_true, dtype=float)
+    j_hat = np.asarray(j_hat, dtype=float)
+    if j_true.shape != j_hat.shape or j_true.ndim != 2:
+        raise ValueError(
+            f"j_true and j_hat must both have shape (V, T); got {j_true.shape}, {j_hat.shape}"
+        )
+
+    true_max = np.abs(j_true).max()
+    hat_max = np.abs(j_hat).max()
+    if true_max == 0 or hat_max == 0:
+        return float("nan")
+
+    norm_true = j_true / true_max
+    norm_hat = j_hat / hat_max
+    mse = float(np.mean((norm_true - norm_hat) ** 2))
+    if mse == 0:
+        return float("inf")
+    data_range = 2.0
+    return float(10.0 * np.log10((data_range ** 2) / mse))
+
+
+def auc_at_peak(
+    j_hat: np.ndarray,
+    support: np.ndarray,
+    seed_indices: np.ndarray,
+    j_true: np.ndarray,
+    adjacency,
+    patch_order: int = 2,
+) -> dict:
+    """ROC-AUC at the time of GT peak activity (per Reynaud et al.).
+
+    For each seed s:
+        t_eval_gt = argmax_t |j_true[s, :]|
+        score     = |j_hat[:, t_eval_gt]|     (continuous, shape (V,))
+        label     = support                    (binary GT, shape (V,))
+        auc_s     = roc_auc_score(label, score)
+    Mean over seeds. If support is all-True or all-False the AUC is
+    undefined and NaN is returned.
+
+    `adjacency` and `patch_order` are accepted for signature uniformity
+    with the other metrics; `auc_at_peak` does NOT use a local eval zone
+    (it scores over the whole source space).
+    """
+    j_hat = np.asarray(j_hat, dtype=float)
+    j_true = np.asarray(j_true, dtype=float)
+    support = np.asarray(support, dtype=bool)
+    seed_indices = np.atleast_1d(np.asarray(seed_indices, dtype=int))
+    if seed_indices.size == 0:
+        raise ValueError("seed_indices is empty; at least one seed is required")
+    if j_hat.shape != j_true.shape or j_hat.ndim != 2:
+        raise ValueError(
+            f"j_hat and j_true must both have shape (V, T); got {j_hat.shape}, {j_true.shape}"
+        )
+    if support.shape != (j_hat.shape[0],):
+        raise ValueError(
+            f"support must have shape (V,)={(j_hat.shape[0],)}, got {support.shape}"
+        )
+
+    if not support.any() or support.all():
+        return {
+            "auc_mean": float("nan"),
+            "per_seed_auc": [float("nan")] * len(seed_indices),
+        }
+
+    auc_values: list[float] = []
+    for seed_idx in seed_indices:
+        seed_idx = int(seed_idx)
+        t_gt = int(np.argmax(np.abs(j_true[seed_idx, :])))
+        score = np.abs(j_hat[:, t_gt])
+        auc_values.append(float(roc_auc_score(support, score)))
+    return {
+        "auc_mean": float(np.mean(auc_values)),
+        "per_seed_auc": auc_values,
+    }
+
+
+def compute_all_metrics(
+    j_true: np.ndarray,
+    j_hat: np.ndarray,
+    seed_indices: np.ndarray,
+    support: np.ndarray,
+    coords_mm: np.ndarray,
+    adjacency,
+    sfreq: float,
+    patch_order: int = 2,
+) -> dict:
+    """Single-call entry point: returns a flat dict suitable for direct
+    insertion as a row in a long-format records DataFrame.
+    """
+    le = localization_error(j_true, j_hat, seed_indices, coords_mm, adjacency, patch_order)
+    te = time_error(j_true, j_hat, seed_indices, adjacency, sfreq, patch_order)
+    nm = normalized_mse(j_true, j_hat, seed_indices, adjacency, patch_order)
+    ps = psnr_temporal(j_true, j_hat)
+    au = auc_at_peak(j_hat, support, seed_indices, j_true, adjacency, patch_order)
+    return {
+        "le_mm": le["le_mm_mean"],
+        "te_ms": te["te_ms_mean"],
+        "nmse": nm["nmse_mean"],
+        "psnr_db": ps,
+        "auc": au["auc_mean"],
+        "per_seed_le_mm": le["per_seed_le_mm"],
+        "per_seed_te_ms": te["per_seed_te_ms"],
+        "per_seed_nmse": nm["per_seed_nmse"],
+        "per_seed_auc": au["per_seed_auc"],
+        "true_seed_indices": le["true_seed_indices"],
+        "pred_seed_indices": le["pred_seed_indices"],
+        "t_eval_gt_indices": te["t_eval_gt_indices"],
+        "t_eval_pred_indices": te["t_eval_pred_indices"],
     }
