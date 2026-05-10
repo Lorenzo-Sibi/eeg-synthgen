@@ -158,9 +158,12 @@ def apply_method(method: str, evoked: mne.EvokedArray, inverse_op,
     """Dispatch to the appropriate MNE inverse routine.
 
     All five methods use the same fixed-orientation forward (see
-    make_mne_state). LCMV uses pick_ori='max-power' (Hauk 2022): with a
-    fixed-orientation forward this degenerates to a single-orientation
-    beamformer, so the output is always a scalar SourceEstimate.
+    make_mne_state). LCMV is computed with pick_ori=None on the fixed
+    forward: this degenerates to a single-orientation beamformer (one
+    DOF per vertex along the surface normal), with scalar (V, T) output
+    that aligns with the GT space. MNE's make_lcmv rejects
+    pick_ori='max-power' on a fixed forward, so we use the only valid
+    setting that keeps the source space coherent across methods.
     """
     canonical = _METHOD_CANONICAL.get(method.lower(), method)
 
@@ -171,9 +174,9 @@ def apply_method(method: str, evoked: mne.EvokedArray, inverse_op,
             empirical_covariance(evoked),
             reg=0.05,
             noise_cov=mne.make_ad_hoc_cov(evoked.info),
-            pick_ori="max-power",
+            pick_ori=None,
             weight_norm="unit-noise-gain",
-            reduce_rank=True,
+            reduce_rank=False,
             verbose=False,
         )
         return apply_lcmv(evoked, filters, verbose=False)
@@ -304,7 +307,7 @@ def write_records_csv(records: list[dict], path: Path) -> None:
 def write_summary_markdown(
     records: list[dict], path: Path, metrics: list[str] = DEFAULT_METRICS
 ) -> None:
-    """Paper-style markdown table: mean ± std | median [Q25, Q75], one row per method."""
+    """Paper-style markdown table: mean ± std (median [Q25, Q75]), one row per method."""
     df = pd.DataFrame.from_records(records)
     rows: list[dict] = []
     for method, sub in df.groupby("method"):
@@ -314,9 +317,10 @@ def write_summary_markdown(
             if len(vals) == 0:
                 row[m] = "—"
                 continue
+            # Use parentheses (not pipe) so the cell does not break the markdown table.
             row[m] = (
                 f"{vals.mean():.3g} ± {vals.std():.3g}"
-                f" | {vals.median():.3g} [{vals.quantile(0.25):.3g}, {vals.quantile(0.75):.3g}]"
+                f" ({vals.median():.3g} [{vals.quantile(0.25):.3g}, {vals.quantile(0.75):.3g}])"
             )
         rows.append(row)
     summary = pd.DataFrame(rows)
@@ -331,7 +335,7 @@ def write_summary_markdown(
         lines.append("| " + " | ".join(cells) + " |")
     path.write_text(
         "# Summary by method\n\n"
-        "Format: mean ± std | median [Q25, Q75]\n\n"
+        "Format: mean ± std (median [Q25, Q75])\n\n"
         + "\n".join(lines)
         + "\n"
     )
