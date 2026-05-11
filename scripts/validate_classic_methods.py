@@ -1,465 +1,598 @@
 import argparse
+import datetime as _dt
+import importlib.metadata as _md
 import json
-import os
-import matplotlib.pyplot as plt
-from collections import defaultdict
-from dataclasses import dataclass
+import subprocess
 from pathlib import Path
-
-
 import numpy as np
-from numcodecs import Zstd
-from scipy.spatial.distance import cdist
-
-os.environ.setdefault("MNE_DONTWRITE_HOME", "true")
-os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba-cache")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-cache")
+import pandas as pd
+import zarr
 
 import mne
 from mne.beamformer import apply_lcmv, make_lcmv
 from mne.minimum_norm import apply_inverse, make_inverse_operator
 
+from synthgen.analysis.inverse_metrics import SurfaceGeometry, compute_all_metrics
 from synthgen.banks.leadfield import LeadfieldBank
 from synthgen.config import GenerationConfig
 
 
-METRICS = [
-    ("le_mm", "LE(mm)", "Localization error (mm)"),
-    ("recall", "Recall", "Recall"),
-    ("precision", "Prec", "Precision"),
-    ("harmonic_mean", "F1", "Harmonic mean"),
-    ("sd_mm", "SD(mm)", "Spatial dispersion (mm)"),
-]
+# Zarr stores EEG in nV; MNE expects V.
+EEG_NV_TO_V = 1e-9
+
+DEFAULT_METHODS = ["MNE", "dSPM", "sLORETA", "eLORETA", "LCMV"]
+DEFAULT_METRICS = ["le_mm", "te_ms", "nmse", "psnr_db", "auc"]
 
 
-@dataclass(frozen=True)
-class SurfaceGeometry:
-    vertex_coords_mm: np.ndarray
-    vertex_areas_mm2: np.ndarray
+def resolve_output_dir(dataset_dir: Path, override: Path | None) -> Path:
+    """Return the directory where validation artifacts will be written.
+
+    Default layout: <dataset_dir>/eval/valid_<YYYY-MM-DD_HH-MM-SS>/.
+    """
+    if override is not None:
+        out = override
+    else:
+        ts = _dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        out = dataset_dir / "eval" / f"valid_{ts}"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 
-@dataclass(frozen=True)
-class EvalContext:
-    info: mne.Info
-    inverse_operator: object
-    lcmv_forward: mne.Forward
-    geometry: SurfaceGeometry
+def find_datasets(path: Path) -> list[Path]:
+    if (path / "metadata.jsonl").exists() and (path / "data.zarr").exists():
+        return [path]
+    datasets = [
+        child
+        for child in sorted(path.iterdir())
+        if child.is_dir() and (child / "metadata.jsonl").exists() and (child / "data.zarr").exists()
+    ]
+    if not datasets:
+        raise FileNotFoundError(f"No dataset found under {path}")
+    return datasets
 
 
-class MontageDataset:
-    def __init__(self, dataset_dir: Path):
-        self.dataset_dir = Path(dataset_dir)
-        self.store_dir = self.dataset_dir / "data.zarr"
-        self.metadata = self._load_metadata()
-        if not self.metadata:
-            raise ValueError(f"Dataset vuoto: {dataset_dir}")
-        meta = self.metadata[0]
-        self.group_key = f"{meta['anatomy_id']}__{meta['montage_id']}"
-        self.montage_id = meta["montage_id"]
-
-    def _load_metadata(self) -> list[dict]:
-        with (self.dataset_dir / "metadata.jsonl").open("r") as f:
-            return [json.loads(line) for line in f]
-
-    def selected_indices(self, n_samples: int) -> range:
-        return range(min(n_samples, len(self)))
-
-    def read(self, index: int) -> dict:
-        group = self.store_dir / self.group_key
-        return {
-            "eeg": read_zarr_v3_sample(group / "eeg", index),
-            "source_support": read_zarr_v3_sample(group / "source_support", index),
-            "metadata": self.metadata[index],
-        }
-
-    def __len__(self) -> int:
-        return len(self.metadata)
-
-def read_zarr_v3_sample(array_dir: Path, sample_index: int) -> np.ndarray:
-    with (array_dir / "zarr.json").open("r") as f:
-        meta = json.load(f)
-
-    shape = tuple(map(int, meta["shape"]))
-    chunk_shape = tuple(map(int, meta["chunk_grid"]["configuration"]["chunk_shape"]))
-    if any(dim > chunk for dim, chunk in zip(shape[1:], chunk_shape[1:])):
-        raise NotImplementedError(f"{array_dir} has non-sample chunking; this reader expects full trailing axes.")
-
-    chunk_coords = [0] * len(shape)
-    chunk_coords[0] = sample_index // chunk_shape[0]
-    local_index = sample_index % chunk_shape[0]
-    payload = (array_dir / "c" / Path(*map(str, chunk_coords))).read_bytes()
-
-    for codec in reversed(meta.get("codecs", [])):
-        if codec["name"] == "zstd":
-            payload = Zstd(**codec.get("configuration", {})).decode(payload)
-        elif codec["name"] != "bytes":
-            raise NotImplementedError(f"Unsupported Zarr codec {codec['name']!r}")
-
-    dtype = np.dtype(bool if meta["data_type"] == "bool" else meta["data_type"])
-    chunk = np.frombuffer(payload, dtype=dtype).reshape(chunk_shape)
-    sample = chunk[(local_index, *[slice(0, dim) for dim in shape[1:]])]
-    return np.array(sample)
+def read_metadata(dataset_dir: Path) -> list[dict]:
+    with (dataset_dir / "metadata.jsonl").open("r") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def make_info(leadfield, sfreq: float) -> mne.Info:
     info = mne.create_info(leadfield.ch_names, sfreq=sfreq, ch_types="eeg")
     ch_pos = {
-        name: coord.astype(float) / 1000.0
-        for name, coord in zip(leadfield.ch_names, leadfield.electrode_coords)
+        name: xyz.astype(float) / 1000.0
+        for name, xyz in zip(leadfield.ch_names, leadfield.electrode_coords)
     }
-    info.set_montage(mne.channels.make_dig_montage(ch_pos=ch_pos, coord_frame="head"), on_missing="ignore")
+    montage = mne.channels.make_dig_montage(ch_pos=ch_pos, coord_frame="head")
+    info.set_montage(montage, on_missing="ignore")
 
     dummy = mne.EvokedArray(np.zeros((len(info.ch_names), 1)), info, tmin=0.0, verbose=False)
     dummy.set_eeg_reference("average", projection=True, verbose=False)
     return dummy.info
 
 
-def make_evoked(eeg: np.ndarray, info: mne.Info) -> mne.EvokedArray:
-    return mne.EvokedArray(eeg.astype(float) * 1e-9, info.copy(), tmin=0.0, comment="synthgen", verbose=False)
-
-
-def load_forward(forward_dir: Path, anatomy_id: str, montage_id: str, *, fixed: bool) -> mne.Forward:
-    path = forward_dir / anatomy_id / montage_id / "forward-fwd.fif"
+def read_forward(meta: dict, forward_dir: Path, fixed: bool) -> mne.Forward:
+    path = forward_dir / meta["anatomy_id"] / meta["montage_id"] / "forward-fwd.fif"
     if not path.exists():
-        raise FileNotFoundError(f"Forward FIF not found: {path}")
+        raise FileNotFoundError(f"Forward solution not found: {path}")
+
     fwd = mne.read_forward_solution(path, verbose=False)
-    return mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=True, verbose=False) if fixed else fwd
+    if fixed:
+        return mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=True, verbose=False)
+    return fwd
 
 
-def surface_geometry_from_forward(fwd: mne.Forward) -> SurfaceGeometry:
+def surface_geometry(fwd: mne.Forward) -> SurfaceGeometry:
     coords, areas = [], []
+
     for src in fwd["src"]:
         vertno = np.asarray(src["vertno"], dtype=int)
-        hemi_coords = np.asarray(src["rr"][vertno], dtype=float) * 1000.0
-        hemi_areas = np.zeros(len(vertno), dtype=float)
+        xyz = np.asarray(src["rr"][vertno], dtype=float) * 1000.0
+        area = np.ones(len(vertno), dtype=float)
 
         tris = np.asarray(src.get("use_tris", []), dtype=int)
         if len(tris):
-            tri_coords = hemi_coords[tris]
-            tri_areas = 0.5 * np.linalg.norm(
-                np.cross(tri_coords[:, 1] - tri_coords[:, 0], tri_coords[:, 2] - tri_coords[:, 0]),
+            area[:] = 0.0
+            tri_xyz = xyz[tris]
+            tri_area = 0.5 * np.linalg.norm(
+                np.cross(tri_xyz[:, 1] - tri_xyz[:, 0], tri_xyz[:, 2] - tri_xyz[:, 0]),
                 axis=1,
             )
-            np.add.at(hemi_areas, tris.ravel(), np.repeat(tri_areas / 3.0, 3))
-        else:
-            hemi_areas.fill(1.0)
+            np.add.at(area, tris.ravel(), np.repeat(tri_area / 3.0, 3))
 
-        coords.append(hemi_coords)
-        areas.append(hemi_areas)
+        coords.append(xyz)
+        areas.append(area)
 
     return SurfaceGeometry(
-        np.concatenate(coords).astype(np.float32),
-        np.concatenate(areas).astype(np.float32),
+        vertex_coords_mm=np.concatenate(coords).astype(np.float32),
+        vertex_areas_mm2=np.concatenate(areas).astype(np.float32),
     )
 
 
-def build_context(
-    meta: dict,
-    config: GenerationConfig,
-    leadfield_bank: LeadfieldBank,
-    forward_dir: Path,
-    methods: list[str],
-) -> EvalContext:
+def make_mne_state(meta: dict, sfreq: float, leadfield_bank: LeadfieldBank, forward_dir: Path):
+    """Build the shared MNE state for a (montage, anatomy) subset.
+
+    Returns: (info, inverse_op, geometry, adjacency, fwd_fixed)
+    All inverse methods (MNE/dSPM/sLORETA/eLORETA/LCMV) operate on the
+    SAME fixed-orientation forward — see plan §7.4 for the rationale
+    (Hauk 2022 convention; eliminates apples-vs-oranges between
+    free-orientation LCMV and fixed-orientation MNE-family).
+    """
     leadfield = leadfield_bank.load(meta["leadfield_id"])
-    info = make_info(leadfield, config.temporal.sfreq)
-    fixed_fwd = load_forward(forward_dir, meta["anatomy_id"], meta["montage_id"], fixed=True)
-    lcmv_fwd = (
-        load_forward(forward_dir, meta["anatomy_id"], meta["montage_id"], fixed=False)
-        if any(m.upper() == "LCMV" for m in methods)
-        else fixed_fwd
-    )
-    inv = make_inverse_operator(
+    info = make_info(leadfield, sfreq)
+    fwd_fixed = read_forward(meta, forward_dir, fixed=True)
+
+    inverse_op = make_inverse_operator(
         info,
-        fixed_fwd,
+        fwd_fixed,
         mne.make_ad_hoc_cov(info),
         loose=0.0,
         fixed=True,
         depth=None,
         verbose=False,
     )
-    return EvalContext(info, inv, lcmv_fwd, surface_geometry_from_forward(fixed_fwd))
+    geometry = surface_geometry(fwd_fixed)
+    adjacency = mne.spatial_src_adjacency(fwd_fixed["src"], verbose=False).tocsr()
+
+    return info, inverse_op, geometry, adjacency, fwd_fixed
 
 
 def empirical_covariance(evoked: mne.EvokedArray, reg: float = 1e-6) -> mne.Covariance:
     data = evoked.data.astype(float)
-    demeaned = data - data.mean(axis=1, keepdims=True)
-    cov = demeaned @ demeaned.T / max(demeaned.shape[1] - 1, 1)
-    cov += np.eye(cov.shape[0]) * max(float(np.trace(cov)) / cov.shape[0], np.finfo(float).eps) * reg
+    data = data - data.mean(axis=1, keepdims=True)
+    cov = data @ data.T / max(data.shape[1] - 1, 1)
+    cov += np.eye(cov.shape[0]) * max(np.trace(cov) / cov.shape[0], np.finfo(float).eps) * reg
     return mne.Covariance(cov, evoked.info.ch_names, evoked.info["bads"], evoked.info["projs"], data.shape[1])
 
 
-def apply_methods(evoked: mne.EvokedArray, ctx: EvalContext, methods: list[str], snr_db: float) -> dict:
-    out = {}
-    lambda2 = 1.0 / (10.0 ** (snr_db / 20.0)) ** 2
-    for method in methods:
-        if method.upper() == "LCMV":
-            filters = make_lcmv(
-                evoked.info,
-                ctx.lcmv_forward,
-                empirical_covariance(evoked),
-                reg=0.05,
-                noise_cov=mne.make_ad_hoc_cov(evoked.info),
-                pick_ori=None,
-                weight_norm="unit-noise-gain",
-                reduce_rank=True,
-                verbose=False,
-            )
-            out[method] = apply_lcmv(evoked, filters, verbose=False)
-        else:
-            out[method] = apply_inverse(evoked, ctx.inverse_operator, lambda2, method=method, verbose=False)
-    return out
+_METHOD_CANONICAL = {
+    "mne": "MNE",
+    "dspm": "dSPM",
+    "sloreta": "sLORETA",
+    "eloreta": "eLORETA",
+    "lcmv": "LCMV",
+}
 
 
-def stc_scores(stc) -> np.ndarray:
-    return np.max(np.abs(stc.data), axis=1)
+def apply_method(method: str, evoked: mne.EvokedArray, inverse_op,
+                 fwd_fixed: mne.Forward, snr_db: float):
+    """Dispatch to the appropriate MNE inverse routine.
 
+    All five methods use the same fixed-orientation forward (see
+    make_mne_state). LCMV is computed with pick_ori=None on the fixed
+    forward: this degenerates to a single-orientation beamformer (one
+    DOF per vertex along the surface normal), with scalar (V, T) output
+    that aligns with the GT space. MNE's make_lcmv rejects
+    pick_ori='max-power' on a fixed forward, so we use the only valid
+    setting that keeps the source space coherent across methods.
+    """
+    canonical = _METHOD_CANONICAL.get(method.lower(), method)
 
-def otsu_threshold(values: np.ndarray) -> float:
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        return np.inf
-    if np.allclose(values.min(), values.max()):
-        return float(values.max())
-
-    hist, edges = np.histogram(values, bins=256)
-    centers = (edges[:-1] + edges[1:]) / 2.0
-    total = float(hist.sum())
-    w0 = np.cumsum(hist) / total
-    w1 = 1.0 - w0
-    mu0 = np.cumsum(centers * hist) / (np.cumsum(hist) + 1e-20)
-    mu_total = float((centers * hist).sum()) / total
-    mu1 = (mu_total - w0 * mu0) / (w1 + 1e-20)
-    return float(centers[np.argmax(w0 * w1 * (mu0 - mu1) ** 2)])
-
-
-def weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
-    denom = float(weights.sum())
-    return float(np.sum(values * weights) / denom) if denom > 0 else np.nan
-
-
-def compute_paper_metrics(scores: np.ndarray, support: np.ndarray, geometry: SurfaceGeometry) -> dict:
-    scores = np.nan_to_num(np.asarray(scores, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
-    support = np.asarray(support, dtype=bool)
-    coords = geometry.vertex_coords_mm
-    areas = geometry.vertex_areas_mm2.astype(float)
-    if scores.shape != support.shape or scores.shape != areas.shape:
-        raise ValueError(f"shape mismatch: scores={scores.shape}, support={support.shape}, areas={areas.shape}")
-
-    estimated = scores > otsu_threshold(scores)
-    overlap = support & estimated
-    gt_area = float(areas[support].sum())
-    est_area = float(areas[estimated].sum())
-    overlap_area = float(areas[overlap].sum())
-
-    recall = overlap_area / gt_area if gt_area else np.nan
-    precision = overlap_area / est_area if est_area else np.nan
-    f1 = 2 * recall * precision / (recall + precision + 1e-12)
-
-    if not support.any() or not estimated.any():
-        le = sd = np.nan
-    else:
-        distances = cdist(coords[support], coords[estimated])
-        gt_to_est = distances.min(axis=1)
-        est_to_gt = distances.min(axis=0)
-        le = 0.5 * (
-            weighted_mean(gt_to_est, areas[support])
-            + weighted_mean(est_to_gt, areas[estimated])
+    if canonical == "LCMV":
+        filters = make_lcmv(
+            evoked.info,
+            fwd_fixed,
+            empirical_covariance(evoked),
+            reg=0.05,
+            noise_cov=mne.make_ad_hoc_cov(evoked.info),
+            pick_ori=None,
+            weight_norm="unit-noise-gain",
+            reduce_rank=False,
+            verbose=False,
         )
-        sd_weights = areas[estimated] * scores[estimated] ** 2
-        sd = float(np.sqrt(np.sum(est_to_gt**2 * sd_weights) / (sd_weights.sum() + 1e-20)))
+        return apply_lcmv(evoked, filters, verbose=False)
 
-    return {
-        "le_mm": le,
-        "recall": recall,
-        "precision": precision,
-        "harmonic_mean": f1,
-        "sd_mm": sd,
-        "gt_area_cm2": gt_area / 100.0,
-        "estimated_area_cm2": est_area / 100.0,
-        "overlap_area_cm2": overlap_area / 100.0,
+    snr_amp = 10.0 ** (float(snr_db) / 20.0)
+    return apply_inverse(
+        evoked, inverse_op,
+        lambda2=1.0 / snr_amp ** 2,
+        method=canonical,
+        verbose=False,
+    )
+
+
+def evaluate_subset(
+    store, group_key: str, metadata: list[dict], args, sfreq, leadfield_bank
+) -> tuple[list[dict], dict]:
+    """Evaluate every (sample, method) pair in a subset.
+
+    Returns: (records, mne_state). `mne_state` exposes the MNE objects
+    so the optional brain-plot helper (Task 16) can reuse them without
+    rebuilding the inverse operator.
+    """
+    print(
+        f"  {metadata[0]['montage_id']}: {len(metadata)} sample(s)"
+        + (f" (n_samples={args.n_samples})" if args.n_samples is not None else "")
+    )
+    info, inverse_op, geometry, adjacency, fwd_fixed = make_mne_state(
+        metadata[0], sfreq, leadfield_bank, args.forward_dir
+    )
+
+    group = store[group_key]
+    sa       = group["source_activity"]  # (N, V, T)
+    supports = group["source_support"]   # (N, V)
+    eeg      = group["eeg"]              # (N, C, T)
+
+    n_total = sa.shape[0]
+    if args.n_samples is not None and args.n_samples < n_total:
+        indices = np.random.choice(n_total, size=args.n_samples, replace=False)
+        indices.sort()  # sequential is better on zarr chunked
+        metadata = [metadata[i] for i in indices]
+    else:
+        indices = np.arange(n_total)
+
+    records: list[dict] = []
+    for sample_idx, (zarr_idx, meta) in enumerate(zip(indices, metadata)):
+        zarr_idx = int(zarr_idx)
+
+        evoked = mne.EvokedArray(
+            np.asarray(eeg[zarr_idx]).astype(float) * EEG_NV_TO_V,
+            info.copy(),
+            tmin=0.0,
+            verbose=False,
+        )
+        support = np.asarray(supports[zarr_idx], dtype=bool)
+        j_true = np.asarray(sa[zarr_idx], dtype=float)
+        seed_indices = np.asarray(meta["seed_vertex_indices"], dtype=int)
+
+        for method in args.methods:
+            stc = apply_method(method, evoked, inverse_op, fwd_fixed, meta["snr_sensor_db"])
+            j_hat = np.asarray(stc.data, dtype=float)
+            assert j_true.shape == j_hat.shape, (
+                f"Shape mismatch GT vs {method}: {j_true.shape} vs {j_hat.shape}"
+            )
+
+            metrics = compute_all_metrics(
+                j_true=j_true,
+                j_hat=j_hat,
+                seed_indices=seed_indices,
+                support=support,
+                coords_mm=geometry.vertex_coords_mm,
+                adjacency=adjacency,
+                sfreq=sfreq,
+                patch_order=2,
+            )
+
+            records.append({
+                "dataset":      str(args.current_dataset),
+                "sample_idx":   sample_idx,
+                "zarr_idx":     zarr_idx,
+                "montage_id":   meta["montage_id"],
+                "anatomy_id":   meta["anatomy_id"],
+                "snr_db":       float(meta["snr_sensor_db"]),
+                "snr_bin_db":   int(np.floor(float(meta["snr_sensor_db"]) / 5.0) * 5),
+                "n_sources":    int(meta.get("n_sources", 1)),
+                "prior_family": meta.get("prior_family", ""),
+                "method":       method,
+                **metrics,
+            })
+
+    mne_state = dict(
+        info=info,
+        inverse_op=inverse_op,
+        geometry=geometry,
+        adjacency=adjacency,
+        fwd_fixed=fwd_fixed,
+    )
+    return records, mne_state
+
+
+# ---------------------------------------------------------------------------
+# Output writers
+# ---------------------------------------------------------------------------
+
+_LIST_COLUMNS = {
+    "per_seed_le_mm", "per_seed_te_ms", "per_seed_nmse", "per_seed_auc",
+    "true_seed_indices", "pred_seed_indices",
+    "t_eval_gt_indices", "t_eval_pred_indices",
+}
+
+_DIRECTION = {"le_mm": "↓", "te_ms": "↓", "nmse": "↓", "psnr_db": "↑", "auc": "↑"}
+_METRIC_HUMAN = {
+    "le_mm":   "LE [mm]",
+    "te_ms":   "TE [ms]",
+    "nmse":    "nMSE",
+    "psnr_db": "PSNR [dB]",
+    "auc":     "AUC",
+}
+
+
+def write_records_csv(records: list[dict], path: Path) -> None:
+    """Long-format CSV. List-valued columns are JSON-encoded for safe round-trip."""
+    df = pd.DataFrame.from_records(records)
+    for col in _LIST_COLUMNS & set(df.columns):
+        df[col] = df[col].apply(json.dumps)
+    df.to_csv(path, index=False)
+
+
+def write_summary_markdown(
+    records: list[dict], path: Path, metrics: list[str] = DEFAULT_METRICS
+) -> None:
+    """Paper-style markdown table: mean ± std (median [Q25, Q75]), one row per method."""
+    df = pd.DataFrame.from_records(records)
+    rows: list[dict] = []
+    for method, sub in df.groupby("method"):
+        row: dict = {"method": method}
+        for m in metrics:
+            vals = pd.to_numeric(sub[m], errors="coerce").dropna()
+            if len(vals) == 0:
+                row[m] = "—"
+                continue
+            # Use parentheses (not pipe) so the cell does not break the markdown table.
+            row[m] = (
+                f"{vals.mean():.3g} ± {vals.std():.3g}"
+                f" ({vals.median():.3g} [{vals.quantile(0.25):.3g}, {vals.quantile(0.75):.3g}])"
+            )
+        rows.append(row)
+    summary = pd.DataFrame(rows)
+
+    header = ["Method"] + [f"{_METRIC_HUMAN[m]} {_DIRECTION[m]}" for m in metrics]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * len(header)) + " |",
+    ]
+    for _, row in summary.iterrows():
+        cells = [str(row["method"])] + [str(row[m]) for m in metrics]
+        lines.append("| " + " | ".join(cells) + " |")
+    path.write_text(
+        "# Summary by method\n\n"
+        "Format: mean ± std (median [Q25, Q75])\n\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
+def write_crosstab_csv(
+    records: list[dict], path: Path, group_col: str,
+    metrics: list[str] = DEFAULT_METRICS,
+) -> None:
+    """Cross-tab CSV with mean/std/median/q25/q75 per (group_col, method)."""
+    df = pd.DataFrame.from_records(records)
+    out_rows: list[dict] = []
+    for (group_val, method), sub in df.groupby([group_col, "method"]):
+        row: dict = {group_col: group_val, "method": method, "n": len(sub)}
+        for m in metrics:
+            vals = pd.to_numeric(sub[m], errors="coerce").dropna()
+            if len(vals):
+                row[f"{m}_mean"]   = float(vals.mean())
+                row[f"{m}_std"]    = float(vals.std())
+                row[f"{m}_median"] = float(vals.median())
+                row[f"{m}_q25"]    = float(vals.quantile(0.25))
+                row[f"{m}_q75"]    = float(vals.quantile(0.75))
+            else:
+                for suffix in ("mean", "std", "median", "q25", "q75"):
+                    row[f"{m}_{suffix}"] = float("nan")
+        out_rows.append(row)
+    pd.DataFrame(out_rows).to_csv(path, index=False)
+
+
+def _git_revision() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            timeout=2.0,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def dump_run_config(
+    args: argparse.Namespace,
+    config_obj,
+    path: Path,
+    n_records: int,
+    started_at: str,
+    finished_at: str,
+) -> None:
+    """Write a JSON snapshot of CLI args, config, git rev, package versions."""
+    versions: dict[str, str] = {}
+    for pkg in ("mne", "numpy", "scipy", "scikit-learn", "matplotlib", "pandas", "zarr"):
+        try:
+            versions[pkg] = _md.version(pkg)
+        except Exception:
+            versions[pkg] = "unknown"
+    payload = {
+        "cli_args": {
+            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
+        },
+        "config": config_obj.model_dump() if hasattr(config_obj, "model_dump") else None,
+        "git_revision": _git_revision(),
+        "package_versions": versions,
+        "n_records": n_records,
+        "started_at": started_at,
+        "finished_at": finished_at,
     }
+    path.write_text(json.dumps(payload, indent=2, default=str))
 
 
-def evaluate_sample(sample: dict, ctx: EvalContext, methods: list[str]) -> list[dict]:
-    meta = sample["metadata"]
-    evoked = make_evoked(sample["eeg"], ctx.info)
-    stcs = apply_methods(evoked, ctx, methods, meta["snr_sensor_db"])
-    rows = []
-    for method, stc in stcs.items():
-        rows.append({
-            "montage_id": meta["montage_id"],
-            "snr_db": meta["snr_sensor_db"],
-            "snr_bin_db": int(np.floor(meta["snr_sensor_db"] / 5.0) * 5),
-            "n_sources": meta.get("n_sources", 1),
-            "prior_family": meta.get("prior_family", "?"),
-            "method": method,
-            **compute_paper_metrics(stc_scores(stc), sample["source_support"], ctx.geometry),
-        })
-    return rows
+# ---------------------------------------------------------------------------
+# Optional brain plots
+# ---------------------------------------------------------------------------
+
+def save_worst_le_brain_plots(
+    records: list[dict],
+    output_dir: Path,
+    datasets_state: dict,
+    eeg_data_by_dataset: dict,
+) -> None:
+    """For each (montage, method) save one PNG with the worst-LE sample.
+
+    The brain is rendered at the time of the GT peak of the first seed
+    (t_eval_gt[0]) for visual coherence with the LE metric.
+
+    `datasets_state` maps dataset_dir → mne_state dict from evaluate_subset.
+    `eeg_data_by_dataset` maps dataset_dir → (sa, supports, eeg) zarr handles.
+    """
+    df = pd.DataFrame.from_records(records)
+    brain_dir = output_dir / "brain_plots"
+    brain_dir.mkdir(exist_ok=True)
+
+    for (montage, method), sub in df.groupby(["montage_id", "method"]):
+        if sub["le_mm"].dropna().empty:
+            continue
+        worst = sub.loc[sub["le_mm"].idxmax()]
+        dataset_dir = Path(worst["dataset"])
+        state = datasets_state.get(dataset_dir)
+        if state is None:
+            continue
+        _sa, _supports, eeg = eeg_data_by_dataset[dataset_dir]
+        zarr_idx = int(worst["zarr_idx"])
+
+        evoked = mne.EvokedArray(
+            np.asarray(eeg[zarr_idx]).astype(float) * EEG_NV_TO_V,
+            state["info"].copy(),
+            tmin=0.0,
+            verbose=False,
+        )
+        snr_db = float(worst["snr_db"])
+        stc = apply_method(method, evoked, state["inverse_op"], state["fwd_fixed"], snr_db)
+
+        true_seeds = json.loads(worst["true_seed_indices"])
+        pred_seeds = json.loads(worst["pred_seed_indices"])
+        t_gt_indices = json.loads(worst["t_eval_gt_indices"])
+
+        n_lh = len(stc.vertices[0])
+        initial_time = float(stc.times[t_gt_indices[0]])
+        brain = stc.plot(
+            hemi="both", clim="auto",
+            initial_time=initial_time, time_unit="s",
+            size=(800, 800), smoothing_steps=10,
+        )
+        for seed_row, pred_row in zip(true_seeds, pred_seeds):
+            for row, color, alpha in [(seed_row, "lime", 0.9), (pred_row, "orange", 0.6)]:
+                if row < n_lh:
+                    hemi, mesh_v = "lh", int(stc.vertices[0][row])
+                else:
+                    hemi, mesh_v = "rh", int(stc.vertices[1][row - n_lh])
+                brain.add_foci(
+                    mesh_v, coords_as_verts=True, hemi=hemi,
+                    color=color, scale_factor=0.6, alpha=alpha,
+                )
+
+        brain.add_text(
+            0.05, 0.92,
+            f"{method} worst LE = {worst['le_mm']:.1f} mm — {montage}",
+            "title", font_size=12,
+        )
+        brain.save_image(str(brain_dir / f"worst_le_{montage}_{method}.png"))
+        brain.close()
 
 
-def evaluate_dataset(
-    dataset: MontageDataset,
-    n_samples: int,
-    config: GenerationConfig,
-    leadfield_bank: LeadfieldBank,
-    forward_dir: Path,
-    methods: list[str],
-) -> list[dict]:
-    indices = dataset.selected_indices(n_samples)
-    print(f"  {dataset.montage_id}: {len(indices)}/{len(dataset)} samples")
-    ctx = build_context(dataset.metadata[0], config, leadfield_bank, forward_dir, methods)
-    records = []
-    for index in indices:
-        records.extend(evaluate_sample(dataset.read(index), ctx, methods))
-    return records
-
-
-def finite_mean(rows: list[dict], field: str) -> float:
-    values = np.array([r[field] for r in rows], dtype=float)
-    values = values[np.isfinite(values)]
-    return float(values.mean()) if values.size else np.nan
-
-
-def print_summary(records: list[dict]) -> None:
-    def grouped(keys):
-        groups = defaultdict(list)
-        for record in records:
-            groups[tuple(record[k] for k in keys)].append(record)
-        return groups
-
-    header = f"{'Montage':<22} {'SNR(dB)':>7} {'Method':<8} {'N':>4} " + " ".join(
-        f"{short:>8}" for _, short, _ in METRICS
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate classical EEG inverse methods on synthgen data."
     )
-    print(f"\n{'=== Metrics by montage x 5 dB SNR x method ':=<{len(header)}}")
-    print(header)
-    print("-" * len(header))
-    for (montage, snr, method), rows in sorted(grouped(["montage_id", "snr_bin_db", "method"]).items()):
-        vals = " ".join(f"{finite_mean(rows, field):>8.3g}" for field, _, _ in METRICS)
-        print(f"{montage:<22} {snr:>7} {method:<8} {len(rows):>4} {vals}")
-
-    print(f"\n{'=== Marginal by method ':=<{len(header)}}")
-    for (method,), rows in sorted(grouped(["method"]).items()):
-        vals = " ".join(f"{finite_mean(rows, field):>8.3g}" for field, _, _ in METRICS)
-        print(f"{method:<8} N={len(rows):<4} {vals}")
-
-
-def montage_sort_key(montage: str) -> tuple[int, str]:
-    suffix = montage.rsplit("_", 1)[-1]
-    return (int(suffix), montage) if suffix.isdigit() else (10**9, montage)
-
-
-def short_label(value) -> str:
-    if isinstance(value, tuple):
-        return f"{short_label(value[0])}\n{value[1]} dB"
-    suffix = str(value).rsplit("_", 1)[-1]
-    return f"{suffix} ch" if suffix.isdigit() else str(value)
-
-
-def plot_metric_grid(records: list[dict], group_fn, groups: list, title: str, path: Path | None, show: bool):
-    if not records:
-        return
-    methods = sorted({r["method"] for r in records})
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
-    centers = np.arange(len(groups))
-    width = min(0.24, 0.75 / max(len(methods), 1))
-    offsets = (np.arange(len(methods)) - (len(methods) - 1) / 2.0) * width
-
-    for ax, (field, _, label) in zip(axes.ravel(), METRICS):
-        for j, method in enumerate(methods):
-            data = [metric_values(records, field, method, group_fn, group) for group in groups]
-            pos = centers + offsets[j]
-            box = ax.boxplot(data, positions=pos, widths=width * 0.85, patch_artist=True, showfliers=False)
-            for patch in box["boxes"]:
-                patch.set(facecolor=colors[j % len(colors)], alpha=0.30, edgecolor=colors[j % len(colors)])
-            ax.plot(pos, [finite_array_mean(v) for v in data], "o-", color=colors[j % len(colors)], label=method, ms=4)
-        ax.set_title(label)
-        ax.set_xticks(centers)
-        ax.set_xticklabels([short_label(g) for g in groups], rotation=20, ha="right")
-        ax.grid(axis="y", alpha=0.25)
-        if field in {"recall", "precision", "harmonic_mean"}:
-            ax.set_ylim(-0.02, 1.02)
-
-    axes.ravel()[-1].axis("off")
-    axes.ravel()[0].legend(frameon=False, title="Method")
-    fig.suptitle(title)
-    if path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path, dpi=180)
-        print(f"  Plot salvato: {path}")
-    plt.show() if show else plt.close(fig)
-
-
-def metric_values(records: list[dict], field: str, method: str, group_fn, group) -> np.ndarray:
-    vals = np.array(
-        [r[field] for r in records if group_fn(r) == group and r["method"] == method],
-        dtype=float,
+    parser.add_argument("--dataset-dir", type=Path, required=True)
+    parser.add_argument(
+        "--config", type=Path,
+        default=Path("config/validate_classic_fsaverage.yaml"),
     )
-    vals = vals[np.isfinite(vals)]
-    return vals if vals.size else np.array([np.nan])
-
-
-def finite_array_mean(values: np.ndarray) -> float:
-    values = values[np.isfinite(values)]
-    return float(values.mean()) if values.size else np.nan
-
-
-def plot_metrics(records: list[dict], plot_dir: Path | None, show: bool) -> None:
-    if not (plot_dir or show):
-        return
-    montages = sorted({r["montage_id"] for r in records}, key=montage_sort_key)
-    montage_snr = sorted(
-        {(r["montage_id"], r["snr_bin_db"]) for r in records},
-        key=lambda x: (montage_sort_key(x[0]), x[1]),
+    parser.add_argument("--forward-dir", type=Path, default=Path("banks/leadfield"))
+    parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
+    parser.add_argument(
+        "--montages", nargs="+",
+        help="Optional montage_id filter; only matching subsets are evaluated.",
     )
-    plot_metric_grid(
-        records,
-        lambda r: r["montage_id"],
-        montages,
-        "Metrics by montage",
-        plot_dir / "metrics_by_montage.png" if plot_dir else None,
-        show,
+    parser.add_argument(
+        "--n-samples", type=int,
+        help="Per-montage sample cap. If omitted, all samples are used.",
     )
-    plot_metric_grid(
-        records,
-        lambda r: (r["montage_id"], r["snr_bin_db"]),
-        montage_snr,
-        "Metrics by montage and 5 dB SNR bin",
-        plot_dir / "metrics_by_montage_snr.png" if plot_dir else None,
-        show,
+    parser.add_argument(
+        "--output-dir", type=Path,
+        help=(
+            "Where to write CSV/MD/PDF artifacts. "
+            "Default: <dataset_dir>/eval/valid_<timestamp>/"
+        ),
     )
+    parser.add_argument(
+        "--save-brain-plots", action="store_true",
+        help="Save per-(montage,method) brain plot of worst-LE sample.",
+    )
+    parser.add_argument(
+        "--no-stats", action="store_true",
+        help="Skip ANOVA + Tukey-HSD computation.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate classic EEG inverse methods on synthgen data.")
-    parser.add_argument("--dataset-dir", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=Path("config/validate_classic_fsaverage.yaml"))
-    parser.add_argument("--forward-dir", type=Path, default=Path("banks/leadfield"))
-    parser.add_argument("--methods", nargs="+", default=["sLORETA", "LCMV"])
-    parser.add_argument("--n-samples", type=int, default=200, help="Numero massimo di sample da usare per ogni montaggio.")
-    parser.add_argument("--plot-dir", type=Path)
-    parser.add_argument("--show-plots", action="store_true")
-    args = parser.parse_args()
+    from synthgen.analysis.plotting import boxplot_per_montage, boxplot_per_snr_bin
+    from synthgen.analysis.stat_tests import anova_tukey_per_metric
 
+    args = parse_args()
     config = GenerationConfig.from_yaml(str(args.config))
-    datasets = [
-        MontageDataset(path)
-        for path in sorted(args.dataset_dir.iterdir())
-        if path.is_dir() and (path / "metadata.jsonl").exists() and (path / "data.zarr").exists()
-    ]
-    if not datasets:
-        raise FileNotFoundError(f"No dataset for montage found in {args.dataset_dir}")
     leadfield_bank = LeadfieldBank(config.leadfield_bank)
-    print(f"Montages: {len(datasets)} | max samples/montage: {args.n_samples} | methods: {args.methods}")
 
-    records = []
-    for i, dataset in enumerate(datasets):
-        records.extend(evaluate_dataset(dataset, args.n_samples, config, leadfield_bank, args.forward_dir, args.methods))
-        print(f"Computed dataset {i+1}/{len(datasets)}")
-    print_summary(records)
-    plot_metrics(records, args.plot_dir, args.show_plots)
+    montage_filter = set(args.montages) if args.montages else None
+    output_dir = resolve_output_dir(args.dataset_dir, args.output_dir)
+    started_at = _dt.datetime.now().isoformat(timespec="seconds")
+
+    records: list[dict] = []
+    datasets_state: dict[Path, dict] = {}
+    eeg_data_by_dataset: dict[Path, tuple] = {}
+    for dataset_dir in find_datasets(args.dataset_dir):
+        print(f"\nDataset: {dataset_dir}")
+        args.current_dataset = dataset_dir
+
+        store = zarr.open(str(dataset_dir / "data.zarr"), mode="r")
+        metadata = read_metadata(dataset_dir)
+
+        if montage_filter and metadata[0]["montage_id"] not in montage_filter:
+            print(f"  skipped (not in --montages filter)")
+            continue
+
+        group_key = f"{metadata[0]['anatomy_id']}__{metadata[0]['montage_id']}"
+        assert all(m["montage_id"] == metadata[0]["montage_id"] for m in metadata)
+        assert all(m["anatomy_id"] == metadata[0]["anatomy_id"] for m in metadata)
+        assert all(m["leadfield_id"] == metadata[0]["leadfield_id"] for m in metadata)
+
+        subset_records, mne_state = evaluate_subset(
+            store, group_key, metadata, args, config.temporal.sfreq, leadfield_bank,
+        )
+        records.extend(subset_records)
+
+        if args.save_brain_plots:
+            datasets_state[dataset_dir] = mne_state
+            zgroup = store[group_key]
+            eeg_data_by_dataset[dataset_dir] = (
+                zgroup["source_activity"],
+                zgroup["source_support"],
+                zgroup["eeg"],
+            )
+
+    if not records:
+        raise RuntimeError("No records evaluated. Check --dataset-dir and --montages.")
+
+    # Long-format records and summary tables
+    write_records_csv(records, output_dir / "records.csv")
+    write_summary_markdown(records, output_dir / "summary_by_method.md")
+    write_crosstab_csv(records, output_dir / "summary_by_montage_method.csv", "montage_id")
+    write_crosstab_csv(records, output_dir / "summary_by_snr_method.csv", "snr_bin_db")
+
+    # ANOVA + Tukey-HSD pairwise per metric
+    if not args.no_stats:
+        tukey_df = anova_tukey_per_metric(records, metrics=DEFAULT_METRICS)
+        tukey_df.to_csv(output_dir / "anova_tukey.csv", index=False)
+
+    # Publication-quality boxplots
+    boxplot_per_montage(records, DEFAULT_METRICS, output_dir)
+    boxplot_per_snr_bin(records, DEFAULT_METRICS, output_dir)
+
+    # Optional brain plots of the worst-LE sample per (montage, method)
+    if args.save_brain_plots:
+        save_worst_le_brain_plots(
+            records, output_dir, datasets_state, eeg_data_by_dataset,
+        )
+
+    # Run snapshot for reproducibility
+    finished_at = _dt.datetime.now().isoformat(timespec="seconds")
+    dump_run_config(
+        args, config, output_dir / "run_config.json",
+        len(records), started_at, finished_at,
+    )
+
+    print(f"\nResults written to {output_dir}")
 
 
 if __name__ == "__main__":
