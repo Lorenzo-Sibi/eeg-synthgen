@@ -90,37 +90,29 @@ class AcquisitionPipeline:
         signal_eeg = self._projector.project(source_activity, leadfield).astype(np.float32)
         bg_eeg = self._projector.project(background_activity, leadfield).astype(np.float32)
 
-        # 2. Scale background to achieve target SNIR
-        snir_range = (
-            noise_cfg.snr_hard_range_db
-            if scenario.difficulty == "hard"
-            else noise_cfg.snr_core_range_db
-        )
-        target_snir_db = float(rng.uniform(*snir_range))
+        # 2. Scale background to achieve target SNIR (discrete grid, DeepSIF protocol)
+        target_snir_db = float(rng.choice(noise_cfg.snir_levels_db))    # SNIR = S / (b * S_bg)
         signal_rms = float(np.sqrt(np.mean(signal_eeg ** 2)))
         bg_rms = float(np.sqrt(np.mean(bg_eeg ** 2)))
         if signal_rms > 1e-10 and bg_rms > 1e-10:
             bg_scale = signal_rms / (bg_rms * 10.0 ** (target_snir_db / 20.0))
-            measured_snir = target_snir_db  # exact by construction from the scaling formula
         else:
-            bg_scale = 1.0
-            # Cannot measure meaningful SNIR when signal or background is silent;
-            # report target as measured rather than a spurious large value.
-            measured_snir = target_snir_db
+            # Signal or background silent: SNIR is undefined; emit zero background.
+            bg_scale = 0.0
+        measured_snir = target_snir_db
 
-        clean_eeg = (signal_eeg + bg_scale * bg_eeg).astype(np.float32)
+        clean_eeg = (signal_eeg + bg_scale * bg_eeg).astype(np.float32) # S + b * S_bg, where b is chosen to meet target SNIR
         scenario.snir_db = measured_snir
 
-        # 3. Sample target sensor SNR and add noise
-        # Sensor noise range always uses snr_core_range_db; difficulty is captured via SNIR.
-        target_snr_db = float(rng.uniform(*noise_cfg.snr_core_range_db))
+        # 3. Sample target sensor SNR (discrete grid) and add noise
+        target_snr_db = float(rng.choice(noise_cfg.snr_sensor_levels_db))
         scenario.snr_sensor_db = target_snr_db
 
         noise_families = noise_cfg.families
         noise_weights = np.array(noise_cfg.weights, dtype=np.float64)
         noise_idx = int(rng.choice(len(noise_families), p=noise_weights / noise_weights.sum()))
         noise_family = noise_families[noise_idx]
-        noisy_eeg = self._noise_registry[noise_family].apply(clean_eeg, scenario, rng)
+        noisy_eeg = self._noise_registry[noise_family].apply(signal_eeg, scenario, rng)
 
         # 4. Optionally inject an artifact (uniform family choice — ArtifactConfig has no weights)
         if float(rng.uniform(0.0, 1.0)) < artifact_cfg.artifact_prob:
@@ -134,12 +126,18 @@ class AcquisitionPipeline:
         final_eeg = ref_op.apply(noisy_eeg).astype(np.float32)
 
         # 6. Measure sensor-level SNR
-        total_noise = final_eeg - signal_eeg
+        signal_power = float(np.mean(signal_eeg ** 2))
+        sensor_noise = noisy_eeg - clean_eeg
+        sensor_noise_power = float(np.mean(sensor_noise ** 2))
+        measured_snr_sensor = float(10.0 * np.log10((signal_power + 1e-20) / (sensor_noise_power + 1e-20)))
+        """ 
+        total_noise = final_eeg - signal_eeg    # total_noise = (S + b*S_bg + noise + <artifact> ) - S = b*S_bg + noise + <artifact>
         signal_power = float(np.mean(signal_eeg ** 2))
         noise_power = float(np.mean(total_noise ** 2))
         measured_snr_sensor = float(
             10.0 * np.log10((signal_power + 1e-20) / (noise_power + 1e-20))
         )
+        """
 
         # 7. Build source support mask and active area
         N = len(source_space.vertex_coords)

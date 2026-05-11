@@ -41,23 +41,9 @@ class NSourcesWeights(BaseModel):
         return self
 
 
-class DifficultyWeights(BaseModel):
-    easy: float = 0.40
-    medium: float = 0.35
-    hard: float = 0.25
-
-    @model_validator(mode="after")
-    def weights_sum_to_one(self) -> DifficultyWeights:
-        total = self.easy + self.medium + self.hard
-        if abs(total - 1.0) > 1e-5:
-            raise ValueError(f"Difficulty weights must sum to 1.0, got {total:.4f}")
-        return self
-
-
 class ScenarioPlanConfig(BaseModel):
     prior_family_weights: PriorFamilyWeights = Field(default_factory=PriorFamilyWeights)
     n_sources_weights: NSourcesWeights = Field(default_factory=NSourcesWeights)
-    difficulty_weights: DifficultyWeights = Field(default_factory=DifficultyWeights)
     ood_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
@@ -130,10 +116,17 @@ class BackgroundConfig(BaseModel):
 
 
 class NoiseConfig(BaseModel):
+    """Discrete-grid SNR/SNIR following DeepSIF / ConvDip / ESINet protocol.
+
+    `snir_levels_db`: signal-of-interest vs cerebral background (source-level).
+    `snr_sensor_levels_db`: clean EEG vs measurement noise (sensor-level).
+    Each scenario draws one level uniformly from the corresponding list.
+    """
+
     families: list[str] = ["white_gaussian", "colored_1f", "empirical_resting"]
     weights: list[float] = [0.5, 0.3, 0.2]
-    snr_core_range_db: tuple[float, float] = (0.0, 20.0)
-    snr_hard_range_db: tuple[float, float] = (-5.0, 30.0)
+    snir_levels_db: list[float] = [0.0, 5.0, 10.0, 15.0, 20.0]
+    snr_sensor_levels_db: list[float] = [0.0, 5.0, 10.0, 15.0, 20.0]
 
     @model_validator(mode="after")
     def weights_match_families(self) -> NoiseConfig:
@@ -141,6 +134,10 @@ class NoiseConfig(BaseModel):
             raise ValueError("Noise families and weights must have the same length")
         if abs(sum(self.weights) - 1.0) > 1e-5:
             raise ValueError("Noise weights must sum to 1.0")
+        if not self.snir_levels_db:
+            raise ValueError("snir_levels_db must contain at least one value")
+        if not self.snr_sensor_levels_db:
+            raise ValueError("snr_sensor_levels_db must contain at least one value")
         return self
 
 
@@ -186,16 +183,21 @@ def _check_weight_dict(name: str, weights: dict[int, float]) -> None:
 
 
 class SEREEGABackendConfig(BaseModel):
-    """Small set of knobs controlling SEREEGA waveform variability."""
+    """Small set of knobs controlling SEREEGA waveform variability.
+
+    Source-level signal amplitudes are fixed to canonical units inside the
+    backend (1 µV for the foreground, 0.1 µV for the 1/f background): the
+    physically meaningful quantity is the SNR/SNIR, not the absolute amplitude,
+    which depends on the lead-field gain. Per-epoch normalisation is the
+    consumer's responsibility, matching the DeepSIF / ConvDip / ESINet protocol.
+    """
 
     matlab_sereega_path: Path | None = None
     erp_peak_count_weights: dict[int, float] = Field(default_factory=lambda: {1: 1.0})
     latency_jitter_s_range: tuple[float, float] = (0.05, 0.30)
-    amplitude_range: tuple[float, float] = (0.5, 2.0)
     erp_width_s_range: tuple[float, float] = (0.02, 0.08)
     burst_width_s_range: tuple[float, float] = (0.10, 0.20)
     arm_order: int = Field(default=10, gt=0)
-    background_amplitude_range: tuple[float, float] = (0.1, 0.1)
     patch_spatial_profile: Literal["gaussian", "uniform"] = "gaussian"
     patch_spatial_sigma_mm_range: tuple[float, float] = (12.0, 25.0)
 
@@ -203,14 +205,8 @@ class SEREEGABackendConfig(BaseModel):
     def validate_ranges(self) -> SEREEGABackendConfig:
         _check_weight_dict("sereega.erp_peak_count_weights", self.erp_peak_count_weights)
         _check_range("sereega.latency_jitter_s_range", self.latency_jitter_s_range, ge=0.0)
-        _check_range("sereega.amplitude_range", self.amplitude_range, ge=0.0)
         _check_range("sereega.erp_width_s_range", self.erp_width_s_range, ge=1e-9)
         _check_range("sereega.burst_width_s_range", self.burst_width_s_range, ge=1e-9)
-        _check_range(
-            "sereega.background_amplitude_range",
-            self.background_amplitude_range,
-            ge=0.0,
-        )
         _check_range(
             "sereega.patch_spatial_sigma_mm_range",
             self.patch_spatial_sigma_mm_range,

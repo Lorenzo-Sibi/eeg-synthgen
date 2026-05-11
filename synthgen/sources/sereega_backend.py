@@ -19,6 +19,12 @@ _FAMILY_SIGNAL_CLASSES = {
     "spike_interictal": ("erp",),
 }
 
+# Canonical source-level amplitudes (µV, pre-projection). Absolute amplitude is
+# not a scientifically meaningful knob: the lead-field gain dominates the
+# sensor-level scale, and SNR/SNIR is the invariant quantity (DeepSIF protocol).
+_CANONICAL_AMPLITUDE_UV: float = 1.0
+_CANONICAL_BACKGROUND_AMPLITUDE_UV: float = 0.1
+
 def _signal(class_type: str, **params: Any) -> Signal:
     return {"type": class_type, "params": params}
 
@@ -43,7 +49,7 @@ def _sample_erp_class(
     onset_s = float(scenario.temporal_onsets_s[source_idx])
     if scenario.signal_family == "spike_interictal":
         spike_s = onset_s + _sample_range(rng, cfg.latency_jitter_s_range)
-        amplitude = _sample_range(rng, cfg.amplitude_range)
+        amplitude = _CANONICAL_AMPLITUDE_UV
         return _signal(
             "erp",
             template="spike_interictal",
@@ -59,7 +65,7 @@ def _sample_erp_class(
         for _ in range(n_peaks)
     ]
     widths_ms = [1000.0 * _sample_range(rng, cfg.erp_width_s_range) for _ in range(n_peaks)]
-    amplitudes = [_sample_range(rng, cfg.amplitude_range) for _ in range(n_peaks)]
+    amplitudes = [_CANONICAL_AMPLITUDE_UV for _ in range(n_peaks)]
     order = np.argsort(latencies_s)
     return _signal(
         "erp",
@@ -86,7 +92,7 @@ def _sample_signal_class(
         return _signal(
             "ersp",
             frequency_hz=float(scenario.dominant_frequencies_hz[source_idx]),
-            amplitude=_sample_range(rng, cfg.amplitude_range),
+            amplitude=_CANONICAL_AMPLITUDE_UV,
             phase_cycles=float(rng.uniform(0.0, 1.0)),
             mod_latency_ms=1000.0 * center_s,
             mod_width_ms=1000.0 * _sample_range(rng, cfg.burst_width_s_range),
@@ -97,14 +103,14 @@ def _sample_signal_class(
         return _signal(
             "noise",
             color="pink",
-            amplitude=_sample_range(rng, cfg.amplitude_range),
+            amplitude=_CANONICAL_AMPLITUDE_UV,
             seed=seed,
         )
     if class_name == "arm":
         return _signal(
             "arm",
             order=int(cfg.arm_order),
-            amplitude=_sample_range(rng, cfg.amplitude_range),
+            amplitude=_CANONICAL_AMPLITUDE_UV,
             seed=seed,
         )
     raise ValueError(f"Unknown SEREEGA signal class: {class_name!r}")
@@ -206,15 +212,13 @@ def _generate_1f_background(
     T: int,
     sfreq: float,
     rng: np.random.Generator,
-    sereega_config: SEREEGABackendConfig | None = None,
 ) -> np.ndarray:
-    cfg = sereega_config or SEREEGABackendConfig()
     freqs = np.fft.rfftfreq(T, d=1.0 / sfreq)
     freqs[0] = 1.0
     phases = rng.uniform(0.0, 2 * np.pi, size=(N, len(freqs)))
     bg = np.fft.irfft(np.exp(1j * phases) / np.sqrt(freqs), n=T).astype(np.float32)
     bg = bg / (np.std(bg, axis=1, keepdims=True) + 1e-8)
-    return (bg * _sample_range(rng, cfg.background_amplitude_range)).astype(np.float32)
+    return (bg * _CANONICAL_BACKGROUND_AMPLITUDE_UV).astype(np.float32)
 
 
 class SEREEGABackend(SourceGeneratorBackend):
@@ -270,7 +274,5 @@ class SEREEGABackend(SourceGeneratorBackend):
                 }
             )
 
-        background_activity = _generate_1f_background(
-            N, T, sfreq, rng, cfg
-        )
+        background_activity = _generate_1f_background(N, T, sfreq, rng)
         return source_activity, background_activity
