@@ -361,6 +361,18 @@ def test_pipeline_runner_generates_n_samples(tmp_path):
     assert total == 3
 
 
+def test_pipeline_runner_parallel_generates_n_samples(tmp_path):
+    import zarr
+    from synthgen.pipeline_runner import PipelineRunner
+    _make_bank_files(tmp_path)
+    config = _make_runner_config(tmp_path, n_samples=4).model_copy(update={"n_workers": 2})
+    runner = PipelineRunner(config)
+    runner.run()
+    store = zarr.open(str(tmp_path / "out" / "data.zarr"), mode="r")
+    total = sum(store[k]["eeg"].shape[0] for k in store.group_keys())
+    assert total == 4
+
+
 def test_pipeline_runner_metadata_jsonl(tmp_path):
     from synthgen.pipeline_runner import PipelineRunner
     _make_bank_files(tmp_path)
