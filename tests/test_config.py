@@ -176,7 +176,7 @@ def test_noise_config_defaults():
 
     c = NoiseConfig()
     assert c.snir_levels_db == [0.0, 5.0, 10.0, 15.0, 20.0]
-    assert c.snr_sensor_levels_db == [0.0, 5.0, 10.0, 15.0, 20.0]
+    assert c.snr_sensor_levels_db == [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
 
 
 def test_noise_config_rejects_empty_levels():
@@ -186,6 +186,18 @@ def test_noise_config_rejects_empty_levels():
         NoiseConfig(snir_levels_db=[])
     with pytest.raises(ValidationError):
         NoiseConfig(snr_sensor_levels_db=[])
+
+
+def test_noise_calibration_id_default_is_none():
+    from synthgen.config import NoiseConfig
+    cfg = NoiseConfig()
+    assert cfg.calibration_id is None
+
+
+def test_noise_calibration_id_can_be_set():
+    from synthgen.config import NoiseConfig
+    cfg = NoiseConfig(calibration_id="physionet_v1")
+    assert cfg.calibration_id == "physionet_v1"
 
 
 def test_sereega_config_rejects_invalid_range(tmp_path):

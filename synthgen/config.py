@@ -126,7 +126,8 @@ class NoiseConfig(BaseModel):
     families: list[str] = ["white_gaussian", "colored_1f", "empirical_resting"]
     weights: list[float] = [0.5, 0.3, 0.2]
     snir_levels_db: list[float] = [0.0, 5.0, 10.0, 15.0, 20.0]
-    snr_sensor_levels_db: list[float] = [0.0, 5.0, 10.0, 15.0, 20.0]
+    snr_sensor_levels_db: list[float] = [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
+    calibration_id: str | None = None
 
     @model_validator(mode="after")
     def weights_match_families(self) -> NoiseConfig:
