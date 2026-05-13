@@ -175,17 +175,17 @@ def test_noise_config_defaults():
     from synthgen.config import NoiseConfig
 
     c = NoiseConfig()
-    assert c.snir_levels_db == [0.0, 5.0, 10.0, 15.0, 20.0]
-    assert c.snr_sensor_levels_db == [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
+    assert c.sir_levels_db == [0.0, 5.0, 10.0, 15.0, 20.0]
+    assert c.snr_levels_db == [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
 
 
 def test_noise_config_rejects_empty_levels():
     from synthgen.config import NoiseConfig
 
     with pytest.raises(ValidationError):
-        NoiseConfig(snir_levels_db=[])
+        NoiseConfig(sir_levels_db=[])
     with pytest.raises(ValidationError):
-        NoiseConfig(snr_sensor_levels_db=[])
+        NoiseConfig(snr_levels_db=[])
 
 
 def test_noise_calibration_id_default_is_none():

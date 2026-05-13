@@ -21,7 +21,8 @@ _FAMILY_SIGNAL_CLASSES = {
 
 # Canonical source-level amplitudes (µV, pre-projection). Absolute amplitude is
 # not a scientifically meaningful knob: the lead-field gain dominates the
-# sensor-level scale, and SNR/SNIR is the invariant quantity (DeepSIF protocol).
+# sensor-level scale, and the SIR / SNR / SINR ratios are the invariant
+# quantities (see NoiseConfig docstring).
 _CANONICAL_AMPLITUDE_UV: float = 1.0
 _CANONICAL_BACKGROUND_AMPLITUDE_UV: float = 0.1
 

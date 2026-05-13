@@ -235,7 +235,7 @@ def evaluate_subset(
         seed_indices = np.asarray(meta["seed_vertex_indices"], dtype=int)
 
         for method in args.methods:
-            stc = apply_method(method, evoked, inverse_op, fwd_fixed, meta["snr_sensor_db"])
+            stc = apply_method(method, evoked, inverse_op, fwd_fixed, meta["snr_db"])
             j_hat = np.asarray(stc.data, dtype=float)
             assert j_true.shape == j_hat.shape, (
                 f"Shape mismatch GT vs {method}: {j_true.shape} vs {j_hat.shape}"
@@ -258,8 +258,10 @@ def evaluate_subset(
                 "zarr_idx":     zarr_idx,
                 "montage_id":   meta["montage_id"],
                 "anatomy_id":   meta["anatomy_id"],
-                "snr_db":       float(meta["snr_sensor_db"]),
-                "snr_bin_db":   int(np.floor(float(meta["snr_sensor_db"]) / 5.0) * 5),
+                "snr_db":       float(meta["snr_db"]),
+                "snr_bin_db":   int(np.floor(float(meta["snr_db"]) / 5.0) * 5),
+                "sir_db":       float(meta.get("sir_db", float("nan"))),
+                "sinr_db":      float(meta.get("sinr_db", float("nan"))),
                 "n_sources":    int(meta.get("n_sources", 1)),
                 "prior_family": meta.get("prior_family", ""),
                 "method":       method,

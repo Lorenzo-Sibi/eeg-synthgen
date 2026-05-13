@@ -65,10 +65,13 @@ noise:
     - empirical_resting
     - empirical_channel_cov
   weights: [0.20, 0.20, 0.30, 0.30]
-  # Discrete SNR/SNIR grid following the DeepSIF / ConvDip / ESINet protocol.
+  # Two orthogonal discrete grids using standard array-processing terminology:
+  #   SIR = ||G·Ss|| / ||α·G·Sbg||  — source-level (signal vs cerebral background)
+  #   SNR = ||G·Ss|| / ||E||        — sensor-level (signal vs measurement noise)
+  # SINR = ||G·Ss|| / ||α·G·Sbg + E|| is derived (Van Veen et al. 1997).
   # Each scenario draws one level uniformly from each list.
-  snir_levels_db:        [0.0, 5.0, 10.0, 15.0, 20.0]
-  snr_sensor_levels_db:  [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
+  sir_levels_db:  [0.0, 5.0, 10.0, 15.0, 20.0]
+  snr_levels_db:  [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
   calibration_id: physionet_v1   # reads banks/noise/{calibration_id}.npz at runtime
 
 artifacts:
@@ -84,7 +87,7 @@ reference:
 
 qc:
   min_valid_channels: 10
-  max_snir_deviation_db: 5.0
+  max_sinr_deviation_db: 5.0
   min_inter_source_distance_mm: 10.0
 
 writer:

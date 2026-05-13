@@ -116,17 +116,32 @@ class BackgroundConfig(BaseModel):
 
 
 class NoiseConfig(BaseModel):
-    """Discrete-grid SNR/SNIR following DeepSIF / ConvDip / ESINet protocol.
+    """Discrete-grid disturbance ratios using standard array-processing terminology.
 
-    `snir_levels_db`: signal-of-interest vs cerebral background (source-level).
-    `snr_sensor_levels_db`: clean EEG vs measurement noise (sensor-level).
-    Each scenario draws one level uniformly from the corresponding list.
+    Three ratios appear in the generative model
+    ``Y = R( A( G·Ss + α·G·Sbg + E ) )``, where ``A`` is the (optional) artifact
+    operator (identity, additive disturbance, or channel-zero mask depending on
+    the artifact family):
+
+    - **SIR** (Signal-to-Interference Ratio, source-level): ``||G·Ss|| / ||α·G·Sbg||``.
+      Controls the scale ``α`` of the cerebral background relative to the foreground
+      source. Sampled from ``sir_levels_db``.
+    - **SNR** (Signal-to-Noise Ratio, sensor-level): ``||G·Ss|| / ||E||``. Controls
+      the sensor measurement-noise std relative to the foreground source. Sampled
+      from ``snr_levels_db``.
+    - **SINR** (Signal-to-Interference-plus-Noise Ratio): ``||G·Ss|| / ||α·G·Sbg + E||``.
+      Derived: ``1/SINR_lin = 1/SIR_lin + 1/SNR_lin`` (Van Veen et al., IEEE TBME
+      44(9), 1997). SINR is the natural difficulty axis for downstream analysis.
+
+    SIR and SNR are calibrated against ``||Ss||`` (foreground only) so they are
+    orthogonal axes of the grid: sweeping one does not perturb the realized value
+    of the other.
     """
 
-    families: list[str] = ["white_gaussian", "colored_1f", "empirical_resting"]
-    weights: list[float] = [0.5, 0.3, 0.2]
-    snir_levels_db: list[float] = [0.0, 5.0, 10.0, 15.0, 20.0]
-    snr_sensor_levels_db: list[float] = [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
+    families: list[str] = ["white_gaussian", "colored_1f", "empirical_resting", "empirical_channel_cov"]
+    weights: list[float] = [0.20, 0.20, 0.30, 0.30]
+    sir_levels_db: list[float] = [0.0, 5.0, 10.0, 15.0, 20.0]
+    snr_levels_db: list[float] = [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
     calibration_id: str | None = None
 
     @model_validator(mode="after")
@@ -135,10 +150,10 @@ class NoiseConfig(BaseModel):
             raise ValueError("Noise families and weights must have the same length")
         if abs(sum(self.weights) - 1.0) > 1e-5:
             raise ValueError("Noise weights must sum to 1.0")
-        if not self.snir_levels_db:
-            raise ValueError("snir_levels_db must contain at least one value")
-        if not self.snr_sensor_levels_db:
-            raise ValueError("snr_sensor_levels_db must contain at least one value")
+        if not self.sir_levels_db:
+            raise ValueError("sir_levels_db must contain at least one value")
+        if not self.snr_levels_db:
+            raise ValueError("snr_levels_db must contain at least one value")
         return self
 
 
@@ -154,7 +169,7 @@ class ReferenceConfig(BaseModel):
 
 class QCConfig(BaseModel):
     min_valid_channels: int = 10
-    max_snir_deviation_db: float = 5.0
+    max_sinr_deviation_db: float = 5.0
     min_inter_source_distance_mm: float = 10.0
 
 
@@ -188,9 +203,9 @@ class SEREEGABackendConfig(BaseModel):
 
     Source-level signal amplitudes are fixed to canonical units inside the
     backend (1 µV for the foreground, 0.1 µV for the 1/f background): the
-    physically meaningful quantity is the SNR/SNIR, not the absolute amplitude,
-    which depends on the lead-field gain. Per-epoch normalisation is the
-    consumer's responsibility, matching the DeepSIF / ConvDip / ESINet protocol.
+    physically meaningful quantities are the SIR / SNR / SINR ratios, not the
+    absolute amplitude, which depends on the lead-field gain. Per-epoch
+    normalisation is the consumer's responsibility.
     """
 
     matlab_sereega_path: Path | None = None

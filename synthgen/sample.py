@@ -39,8 +39,9 @@ class Scenario:
     dominant_frequencies_hz: list[float] = field(default_factory=list)
     sereega_trial_parameters: list[dict] = field(default_factory=list)
 
-    snir_db: float = 0.0
-    snr_sensor_db: float = 0.0
+    sir_db: float = 0.0
+    snr_db: float = 0.0
+    sinr_db: float = 0.0
     artifact_flags: list[str] = field(default_factory=list)
 
 
@@ -52,7 +53,8 @@ class EEGSample:
     electrode_coords: np.ndarray
     source_coords: np.ndarray
     params: Scenario
-    snir_measured_db: float
-    snr_sensor_measured_db: float
+    sir_measured_db: float
+    snr_measured_db: float
+    sinr_measured_db: float
     active_area_cm2: float
     config_hash: str

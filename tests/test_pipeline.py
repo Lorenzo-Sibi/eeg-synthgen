@@ -190,8 +190,9 @@ def _make_eeg_sample(
         signal_family="erp",
         split="train",
     )
-    sc.snir_db = 10.0
-    sc.snr_sensor_db = 15.0
+    sc.sir_db = 10.0
+    sc.snr_db = 15.0
+    sc.sinr_db = 8.7
     return EEGSample(
         eeg=rng.standard_normal((C, T)).astype(np.float32),
         source_activity=np.zeros((V, T), dtype=np.float32),
@@ -199,8 +200,9 @@ def _make_eeg_sample(
         electrode_coords=np.zeros((C, 3), dtype=np.float32),
         source_coords=np.zeros((V, 3), dtype=np.float32),
         params=sc,
-        snir_measured_db=10.0,
-        snr_sensor_measured_db=15.0,
+        sir_measured_db=10.0,
+        snr_measured_db=15.0,
+        sinr_measured_db=8.7,
         active_area_cm2=3.0,
         config_hash="deadbeef",
     )
@@ -232,8 +234,9 @@ def test_zarr_writer_correct_shapes(tmp_path):
     grp = store["fsaverage__standard_1005_64"]
     assert grp["eeg"].shape == (3, C, T)
     assert grp["source_support"].shape == (3, V)
-    assert grp["snir_db"].shape == (3,)
-    assert grp["snr_sensor_db"].shape == (3,)
+    assert grp["sir_db"].shape == (3,)
+    assert grp["snr_db"].shape == (3,)
+    assert grp["sinr_db"].shape == (3,)
     assert grp["active_area_cm2"].shape == (3,)
 
 
