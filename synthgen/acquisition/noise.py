@@ -34,7 +34,7 @@ class WhiteGaussianNoise(SensorNoiseEngine):
         rng: np.random.Generator,
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
-        snr_linear = 10.0 ** (scenario.snr_sensor_db / 20.0)
+        snr_linear = 10.0 ** (scenario.snr_db / 20.0)
         signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
         noise_std = signal_rms / (snr_linear + 1e-10)
         noise = rng.standard_normal(clean_eeg.shape).astype(np.float32) * noise_std
@@ -53,7 +53,7 @@ class Colored1fNoise(SensorNoiseEngine):
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
         C, T = clean_eeg.shape
-        snr_linear = 10.0 ** (scenario.snr_sensor_db / 20.0)
+        snr_linear = 10.0 ** (scenario.snr_db / 20.0)
         signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
         target_noise_rms = signal_rms / (snr_linear + 1e-10)
 
@@ -82,7 +82,7 @@ class EmpiricalRestingNoise(SensorNoiseEngine):
         from scipy.signal import lfilter
 
         C, T = clean_eeg.shape
-        snr_linear = 10.0 ** (scenario.snr_sensor_db / 20.0)
+        snr_linear = 10.0 ** (scenario.snr_db / 20.0)
         signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
         target_noise_rms = signal_rms / (snr_linear + 1e-10)
 
@@ -141,7 +141,7 @@ class EmpiricalChannelCov(SensorNoiseEngine):
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
         C, T = clean_eeg.shape
-        snr_linear = 10.0 ** (scenario.snr_sensor_db / 20.0)
+        snr_linear = 10.0 ** (scenario.snr_db / 20.0)
         signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
         target_noise_rms = signal_rms / (snr_linear + 1e-10)
 

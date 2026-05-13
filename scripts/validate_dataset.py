@@ -50,10 +50,14 @@ def validate(dataset_dir: Path) -> None:
         assert "scenario_id" in first, "metadata.jsonl missing scenario_id field"
         assert "prior_family" in first, "metadata.jsonl missing prior_family field"
 
-    # SNR stats from first group
+    # SIR/SNR/SINR stats from first group (targets recorded at sampling time)
     key0 = groups[0]
-    snir = np.array(store[key0]["snir_db"])
-    print(f"\nSNIR (group '{key0}'): {snir.mean():.1f} ± {snir.std():.1f} dB")
+    sir = np.array(store[key0]["sir_db"])
+    snr = np.array(store[key0]["snr_db"])
+    sinr = np.array(store[key0]["sinr_db"])
+    print(f"\nSIR  (group '{key0}'): {sir.mean():.1f} ± {sir.std():.1f} dB")
+    print(f"SNR  (group '{key0}'): {snr.mean():.1f} ± {snr.std():.1f} dB")
+    print(f"SINR (group '{key0}'): {sinr.mean():.1f} ± {sinr.std():.1f} dB")
 
     print(f"\nTotal samples: {n_total}")
     print("Validation passed.")

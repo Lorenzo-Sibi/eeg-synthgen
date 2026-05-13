@@ -41,8 +41,9 @@ def test_scenario_spatial_params_default_empty():
 
 def test_scenario_noise_params_default_zero():
     s = _make_scenario()
-    assert s.snir_db == 0.0
-    assert s.snr_sensor_db == 0.0
+    assert s.sir_db == 0.0
+    assert s.snr_db == 0.0
+    assert s.sinr_db == 0.0
     assert s.artifact_flags == []
 
 
@@ -77,8 +78,9 @@ def test_eeg_sample_shapes():
         electrode_coords=np.zeros((C, 3)),
         source_coords=np.zeros((N, 3)),
         params=s,
-        snir_measured_db=15.0,
-        snr_sensor_measured_db=10.0,
+        sir_measured_db=15.0,
+        snr_measured_db=10.0,
+        sinr_measured_db=8.7,
         active_area_cm2=5.0,
         config_hash="deadbeef",
     )

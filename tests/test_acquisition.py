@@ -20,7 +20,7 @@ def _make_scenario(snr_db: float = 10.0) -> Scenario:
         signal_family="erp",
         split="train",
     )
-    sc.snr_sensor_db = snr_db
+    sc.snr_db = snr_db
     return sc
 
 
@@ -295,7 +295,7 @@ def test_qc_passes_valid_sample(tmp_path):
     config = _make_config(tmp_path)
     sc = _make_scenario()
     sc.inter_source_distances_mm = [50.0]
-    sc.snir_db = 10.0
+    sc.sir_db = 10.0
     C, T, N = 16, 500, 20
     rng = np.random.default_rng(0)
     sample = EEGSample(
@@ -305,8 +305,9 @@ def test_qc_passes_valid_sample(tmp_path):
         electrode_coords=np.zeros((C, 3), dtype=np.float32),
         source_coords=np.zeros((N, 3), dtype=np.float32),
         params=sc,
-        snir_measured_db=10.0,
-        snr_sensor_measured_db=15.0,
+        sir_measured_db=10.0,
+        snr_measured_db=15.0,
+        sinr_measured_db=8.7,
         active_area_cm2=3.0,
         config_hash="deadbeef",
     )
@@ -330,8 +331,9 @@ def test_qc_fails_too_few_valid_channels(tmp_path):
         electrode_coords=np.zeros((C, 3), dtype=np.float32),
         source_coords=np.zeros((N, 3), dtype=np.float32),
         params=sc,
-        snir_measured_db=10.0,
-        snr_sensor_measured_db=15.0,
+        sir_measured_db=10.0,
+        snr_measured_db=15.0,
+        sinr_measured_db=8.7,
         active_area_cm2=3.0,
         config_hash="deadbeef",
     )
@@ -356,8 +358,9 @@ def test_qc_fails_sources_too_close(tmp_path):
         electrode_coords=np.zeros((C, 3), dtype=np.float32),
         source_coords=np.zeros((N, 3), dtype=np.float32),
         params=sc,
-        snir_measured_db=10.0,
-        snr_sensor_measured_db=15.0,
+        sir_measured_db=10.0,
+        snr_measured_db=15.0,
+        sinr_measured_db=8.7,
         active_area_cm2=3.0,
         config_hash="deadbeef",
     )
@@ -382,8 +385,9 @@ def test_qc_single_source_no_distance_check(tmp_path):
         electrode_coords=np.zeros((C, 3), dtype=np.float32),
         source_coords=np.zeros((N, 3), dtype=np.float32),
         params=sc,
-        snir_measured_db=10.0,
-        snr_sensor_measured_db=15.0,
+        sir_measured_db=10.0,
+        snr_measured_db=15.0,
+        sinr_measured_db=8.7,
         active_area_cm2=3.0,
         config_hash="deadbeef",
     )
@@ -459,8 +463,8 @@ def test_pipeline_run_fills_snir_on_scenario(tmp_path):
     pipeline = AcquisitionPipeline(config)
     sample, _ = pipeline.run(sc, ss, src, bg, G, ecords, ch_names, np.random.default_rng(2))
     # The pipeline must draw both SNIR and sensor SNR from the configured grids.
-    assert sc.snir_db in config.noise.snir_levels_db
-    assert sc.snr_sensor_db in config.noise.snr_sensor_levels_db
+    assert sc.sir_db in config.noise.sir_levels_db
+    assert sc.snr_db in config.noise.snr_levels_db
 
 
 def test_pipeline_run_source_support_marks_seeds(tmp_path):

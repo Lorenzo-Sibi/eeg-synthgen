@@ -91,39 +91,51 @@ class AcquisitionPipeline:
         electrode_coords:    (C, 3) float32 — sensor positions in mm
         ch_names:            list of C channel names
 
-        Note: `scenario` is mutated in-place (snir_db, snr_sensor_db, artifact_flags).
-        Pass a distinct Scenario instance per call when running in parallel.
+        Note: `scenario` is mutated in-place (sir_db, snr_db, sinr_db,
+        artifact_flags). Pass a distinct Scenario instance per call when running
+        in parallel.
+
+        Model: ``Y = R( G·Ss + α·G·Sbg + E ) + A`` where
+            ||G·Ss|| / ||α·G·Sbg|| = 10^(SIR/20)   (source-level)
+            ||G·Ss|| / ||E||       = 10^(SNR/20)   (sensor-level)
+            SINR_dB = -10·log10(10^(-SIR/10) + 10^(-SNR/10))   (derived)
+
+        SIR and SNR are calibrated against ||Ss|| only (not ||Ss + α·Sbg||) so
+        they remain orthogonal axes of the discrete grid.
         """
         noise_cfg = self._config.noise
         artifact_cfg = self._config.artifacts
 
-        # 1. Project to sensor space
+        # 1. Project to sensor space (Ss and Sbg independently)
         signal_eeg = self._projector.project(source_activity, leadfield).astype(np.float32)
         bg_eeg = self._projector.project(background_activity, leadfield).astype(np.float32)
 
-        # 2. Scale background to achieve target SNIR (discrete grid, DeepSIF protocol)
-        target_snir_db = float(rng.choice(noise_cfg.snir_levels_db))    # SNIR = S / (b * S_bg)
+        # 2. Sample target SIR (Ss vs cerebral background) and scale background
+        target_sir_db = float(rng.choice(noise_cfg.sir_levels_db))
         signal_rms = float(np.sqrt(np.mean(signal_eeg ** 2)))
         bg_rms = float(np.sqrt(np.mean(bg_eeg ** 2)))
         if signal_rms > 1e-10 and bg_rms > 1e-10:
-            bg_scale = signal_rms / (bg_rms * 10.0 ** (target_snir_db / 20.0))
+            bg_scale = signal_rms / (bg_rms * 10.0 ** (target_sir_db / 20.0))
         else:
-            # Signal or background silent: SNIR is undefined; emit zero background.
+            # Signal or background silent: SIR is undefined; emit zero background.
             bg_scale = 0.0
-        measured_snir = target_snir_db
 
-        clean_eeg = (signal_eeg + bg_scale * bg_eeg).astype(np.float32) # S + b * S_bg, where b is chosen to meet target SNIR
-        scenario.snir_db = measured_snir
-
-        # 3. Sample target sensor SNR (discrete grid) and add noise
-        target_snr_db = float(rng.choice(noise_cfg.snr_sensor_levels_db))
-        scenario.snr_sensor_db = target_snr_db
+        # 3. Sample target SNR (Ss vs sensor noise) and add sensor noise.
+        # The noise engine calibrates noise std against ||Ss||, so we pass
+        # signal_eeg as the reference; the scaled background is added back
+        # after the noise call. This keeps SIR and SNR orthogonal axes.
+        target_snr_db = float(rng.choice(noise_cfg.snr_levels_db))
+        scenario.sir_db = target_sir_db
+        scenario.snr_db = target_snr_db
 
         noise_families = noise_cfg.families
         noise_weights = np.array(noise_cfg.weights, dtype=np.float64)
         noise_idx = int(rng.choice(len(noise_families), p=noise_weights / noise_weights.sum()))
         noise_family = noise_families[noise_idx]
-        noisy_eeg = self._noise_registry[noise_family].apply(signal_eeg, scenario, rng, ch_names=ch_names)
+        signal_plus_noise = self._noise_registry[noise_family].apply(
+            signal_eeg, scenario, rng, ch_names=ch_names
+        )
+        noisy_eeg = (signal_plus_noise + bg_scale * bg_eeg).astype(np.float32)
 
         # 4. Optionally inject an artifact (uniform family choice — ArtifactConfig has no weights)
         if float(rng.uniform(0.0, 1.0)) < artifact_cfg.artifact_prob:
@@ -136,19 +148,28 @@ class AcquisitionPipeline:
         ref_op = _make_reference_op(self._config.reference, ch_names)
         final_eeg = ref_op.apply(noisy_eeg).astype(np.float32)
 
-        # 6. Measure sensor-level SNR
+        # 6. Measured ratios. Sensor noise = (signal+noise) − signal; total
+        # disturbance = (final − signal_eeg_referenced) captures background +
+        # noise + artifact. Reference is applied to the signal to compare apples
+        # to apples (artifacts/background are re-referenced too).
+        signal_eeg_ref = ref_op.apply(signal_eeg).astype(np.float32)
+        sensor_noise = (signal_plus_noise - signal_eeg).astype(np.float32)
+        scaled_bg = (bg_scale * bg_eeg).astype(np.float32)
         signal_power = float(np.mean(signal_eeg ** 2))
-        sensor_noise = noisy_eeg - clean_eeg
         sensor_noise_power = float(np.mean(sensor_noise ** 2))
-        measured_snr_sensor = float(10.0 * np.log10((signal_power + 1e-20) / (sensor_noise_power + 1e-20)))
-        """ 
-        total_noise = final_eeg - signal_eeg    # total_noise = (S + b*S_bg + noise + <artifact> ) - S = b*S_bg + noise + <artifact>
-        signal_power = float(np.mean(signal_eeg ** 2))
-        noise_power = float(np.mean(total_noise ** 2))
-        measured_snr_sensor = float(
-            10.0 * np.log10((signal_power + 1e-20) / (noise_power + 1e-20))
+        scaled_bg_power = float(np.mean(scaled_bg ** 2))
+        disturbance_power = float(np.mean((final_eeg - signal_eeg_ref) ** 2))
+        measured_sir = float(10.0 * np.log10((signal_power + 1e-20) / (scaled_bg_power + 1e-20))) \
+            if scaled_bg_power > 1e-20 else float("inf")
+        measured_snr = float(10.0 * np.log10((signal_power + 1e-20) / (sensor_noise_power + 1e-20)))
+        measured_sinr = float(10.0 * np.log10((signal_power + 1e-20) / (disturbance_power + 1e-20)))
+
+        # Record target SINR (derived from SIR & SNR) so downstream code can
+        # check measured vs target without re-deriving the formula.
+        target_sinr_db = float(
+            -10.0 * np.log10(10.0 ** (-target_sir_db / 10.0) + 10.0 ** (-target_snr_db / 10.0))
         )
-        """
+        scenario.sinr_db = target_sinr_db
 
         # 7. Build source support mask and active area
         N = len(source_space.vertex_coords)
@@ -169,8 +190,9 @@ class AcquisitionPipeline:
             electrode_coords=electrode_coords,
             source_coords=source_space.vertex_coords,
             params=scenario,
-            snir_measured_db=measured_snir,
-            snr_sensor_measured_db=measured_snr_sensor,
+            sir_measured_db=measured_sir,
+            snr_measured_db=measured_snr,
+            sinr_measured_db=measured_sinr,
             active_area_cm2=active_area_cm2,
             config_hash=self._config_hash,
         )

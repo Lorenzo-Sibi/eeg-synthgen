@@ -52,8 +52,9 @@ class ZarrWriter(DatasetWriter):
         grp.create_array("eeg", shape=(0, C, T), dtype="float32", chunks=(cs, C, T))
         grp.create_array("source_activity", shape=(0, V, T), dtype="float32", chunks=(cs, V, T))
         grp.create_array("source_support", shape=(0, V), dtype="bool", chunks=(cs, V))
-        grp.create_array("snir_db", shape=(0,), dtype="float32", chunks=(cs,))
-        grp.create_array("snr_sensor_db", shape=(0,), dtype="float32", chunks=(cs,))
+        grp.create_array("sir_db", shape=(0,), dtype="float32", chunks=(cs,))
+        grp.create_array("snr_db", shape=(0,), dtype="float32", chunks=(cs,))
+        grp.create_array("sinr_db", shape=(0,), dtype="float32", chunks=(cs,))
         grp.create_array("active_area_cm2", shape=(0,), dtype="float32", chunks=(cs,))
         self._n_written[key] = 0
 
@@ -81,8 +82,9 @@ class ZarrWriter(DatasetWriter):
             arr[n0:n0 + n] = batch
 
         for arr_name, vals in [
-            ("snir_db",         [s.params.snir_db for s in buf]),
-            ("snr_sensor_db",   [s.params.snr_sensor_db for s in buf]),
+            ("sir_db",          [s.params.sir_db for s in buf]),
+            ("snr_db",          [s.params.snr_db for s in buf]),
+            ("sinr_db",         [s.params.sinr_db for s in buf]),
             ("active_area_cm2", [s.active_area_cm2 for s in buf]),
         ]:
             arr = grp[arr_name]
