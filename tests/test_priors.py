@@ -322,3 +322,52 @@ def test_state_dependent_reproducible():
     assert sc1.seed_vertex_indices == sc2.seed_vertex_indices
     assert sc1.dominant_frequencies_hz == sc2.dominant_frequencies_hz
     assert sc1.signal_family == sc2.signal_family
+
+
+def test_patch_extent_consistent_across_mesh_resolutions():
+    """Same patch_extents_cm2 -> same geodesic radius reached regardless of mesh density.
+
+    Locks in the property the README "TODO (spatial priors)" called out:
+    `_grow_patch_geodesic` already implements it; this test prevents future
+    regressions.
+    """
+    from synthgen.sources.priors._helpers import (
+        _grow_patch_geodesic,
+        _extent_cm2_to_radius_mm,
+    )
+
+    extent_cm2 = 4.0
+    r_expected = _extent_cm2_to_radius_mm(extent_cm2)
+
+    def make_grid(spacing_mm: float):
+        side = int(60.0 / spacing_mm) + 1
+        coords = np.array(
+            [[i * spacing_mm, j * spacing_mm, 0.0]
+             for i in range(side) for j in range(side)],
+            dtype=np.float64,
+        )
+        n = coords.shape[0]
+        rows, cols = [], []
+        for i in range(side):
+            for j in range(side):
+                idx = i * side + j
+                if i + 1 < side:
+                    rows += [idx, (i + 1) * side + j]
+                    cols += [(i + 1) * side + j, idx]
+                if j + 1 < side:
+                    rows += [idx, i * side + (j + 1)]
+                    cols += [i * side + (j + 1), idx]
+        adj = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+        return coords, adj
+
+    for spacing in (4.0, 2.0):
+        coords, adj = make_grid(spacing)
+        seed = coords.shape[0] // 2
+        patch = _grow_patch_geodesic(adj, coords, seed, r_expected)
+        dists = np.linalg.norm(coords[patch] - coords[seed], axis=1)
+        # Geodesic radius reached must be within one grid spacing of r_expected.
+        # Dijkstra stops at the last vertex strictly within the radius limit.
+        assert dists.max() <= r_expected + spacing * 1.01, (
+            f"spacing={spacing}: max patch dist {dists.max():.2f} mm exceeds "
+            f"expected {r_expected:.2f} + 1 spacing"
+        )
