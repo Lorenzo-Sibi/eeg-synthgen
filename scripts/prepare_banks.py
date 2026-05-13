@@ -439,10 +439,10 @@ def prepare_mne_anatomy(
         )
         fwd_path = (leadfield_bank_dir / anatomy_id / montage_id / "forward-fwd.fif")
         
-        fwd.save(fwd_path, verbose=False) # remember to call convert_forward_solution when opening this! https://mne.tools/stable/generated/mne.read_forward_solution.html#mne.read_forward_solution
-        print(f"    Saved Forward object {anatomy_id}/{montage_id}/forward.-fwd.fif")
         _save_leadfield(lf_path, G, ch_names, elec_coords_mm)
         print(f"    Saved leadfield {anatomy_id}/{montage_id}/{conductivity_id}: {G.shape}")
+        fwd.save(fwd_path, verbose=False) # remember to call convert_forward_solution when opening this! https://mne.tools/stable/generated/mne.read_forward_solution.html#mne.read_forward_solution
+        print(f"    Saved Forward object {anatomy_id}/{montage_id}/forward.-fwd.fif")
 
     if fwd_src_canonical is None:
         raise RuntimeError(
