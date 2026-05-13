@@ -95,10 +95,14 @@ class AcquisitionPipeline:
         artifact_flags). Pass a distinct Scenario instance per call when running
         in parallel.
 
-        Model: ``Y = R( G·Ss + α·G·Sbg + E ) + A`` where
+        Model: ``Y = R( G·Ss + α·G·Sbg + E + A )`` where
             ||G·Ss|| / ||α·G·Sbg|| = 10^(SIR/20)   (source-level)
             ||G·Ss|| / ||E||       = 10^(SNR/20)   (sensor-level)
             SINR_dB = -10·log10(10^(-SIR/10) + 10^(-SNR/10))   (derived)
+
+        Reference R is applied to the full sum (signal + background + noise +
+        artifact) because sensor noise and artifacts are electrode-side
+        disturbances that are themselves re-referenced.
 
         SIR and SNR are calibrated against ||Ss|| only (not ||Ss + α·Sbg||) so
         they remain orthogonal axes of the discrete grid.

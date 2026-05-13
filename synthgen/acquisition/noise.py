@@ -12,14 +12,20 @@ class SensorNoiseEngine(ABC):
     @abstractmethod
     def apply(
         self,
-        clean_eeg: np.ndarray,
+        reference_signal: np.ndarray,
         scenario: Scenario,
         rng: np.random.Generator,
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
-        """Add sensor noise to clean_eeg. Returns noisy_eeg: CxT.
+        """Add sensor noise to ``reference_signal`` and return the sum.
 
-        ``ch_names`` is the channel labels of ``clean_eeg`` rows. Engines that
+        ``reference_signal`` (CxT) is the array whose RMS is used to calibrate
+        the noise std against the target ``scenario.snr_db``: the returned
+        array is ``reference_signal + noise`` with ``||reference_signal|| /
+        ||noise|| = 10^(snr_db/20)``. The pipeline passes ``signal_eeg`` here
+        so that SIR and SNR remain orthogonal axes of the discrete grid.
+
+        ``ch_names`` is the channel labels of the input rows. Engines that
         do not depend on channel identity (white, 1/f, empirical AR) may ignore
         it; engines that read a calibrated covariance bank use it for
         name-matching.
@@ -29,16 +35,16 @@ class SensorNoiseEngine(ABC):
 class WhiteGaussianNoise(SensorNoiseEngine):
     def apply(
         self,
-        clean_eeg: np.ndarray,
+        reference_signal: np.ndarray,
         scenario: Scenario,
         rng: np.random.Generator,
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
         snr_linear = 10.0 ** (scenario.snr_db / 20.0)
-        signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
+        signal_rms = float(np.sqrt(np.mean(reference_signal ** 2)))
         noise_std = signal_rms / (snr_linear + 1e-10)
-        noise = rng.standard_normal(clean_eeg.shape).astype(np.float32) * noise_std
-        return (clean_eeg + noise).astype(np.float32)
+        noise = rng.standard_normal(reference_signal.shape).astype(np.float32) * noise_std
+        return (reference_signal + noise).astype(np.float32)
 
 
 class Colored1fNoise(SensorNoiseEngine):
@@ -47,14 +53,14 @@ class Colored1fNoise(SensorNoiseEngine):
 
     def apply(
         self,
-        clean_eeg: np.ndarray,
+        reference_signal: np.ndarray,
         scenario: Scenario,
         rng: np.random.Generator,
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
-        C, T = clean_eeg.shape
+        C, T = reference_signal.shape
         snr_linear = 10.0 ** (scenario.snr_db / 20.0)
-        signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
+        signal_rms = float(np.sqrt(np.mean(reference_signal ** 2)))
         target_noise_rms = signal_rms / (snr_linear + 1e-10)
 
         freqs = np.fft.rfftfreq(T, d=1.0 / self._sfreq)
@@ -66,7 +72,7 @@ class Colored1fNoise(SensorNoiseEngine):
 
         noise_rms = float(np.sqrt(np.mean(noise ** 2)))
         noise = noise / (noise_rms + 1e-10) * target_noise_rms
-        return (clean_eeg + noise).astype(np.float32)
+        return (reference_signal + noise).astype(np.float32)
 
 
 class EmpiricalRestingNoise(SensorNoiseEngine):
@@ -74,16 +80,16 @@ class EmpiricalRestingNoise(SensorNoiseEngine):
 
     def apply(
         self,
-        clean_eeg: np.ndarray,
+        reference_signal: np.ndarray,
         scenario: Scenario,
         rng: np.random.Generator,
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
         from scipy.signal import lfilter
 
-        C, T = clean_eeg.shape
+        C, T = reference_signal.shape
         snr_linear = 10.0 ** (scenario.snr_db / 20.0)
-        signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
+        signal_rms = float(np.sqrt(np.mean(reference_signal ** 2)))
         target_noise_rms = signal_rms / (snr_linear + 1e-10)
 
         noise = np.zeros((C, T), dtype=np.float32)
@@ -97,7 +103,7 @@ class EmpiricalRestingNoise(SensorNoiseEngine):
 
         noise_rms = float(np.sqrt(np.mean(noise ** 2)))
         noise = noise / (noise_rms + 1e-10) * target_noise_rms
-        return (clean_eeg + noise).astype(np.float32)
+        return (reference_signal + noise).astype(np.float32)
 
 
 class EmpiricalChannelCov(SensorNoiseEngine):
@@ -135,19 +141,19 @@ class EmpiricalChannelCov(SensorNoiseEngine):
 
     def apply(
         self,
-        clean_eeg: np.ndarray,
+        reference_signal: np.ndarray,
         scenario: Scenario,
         rng: np.random.Generator,
         ch_names: list[str] | None = None,
     ) -> np.ndarray:
-        C, T = clean_eeg.shape
+        C, T = reference_signal.shape
         snr_linear = 10.0 ** (scenario.snr_db / 20.0)
-        signal_rms = float(np.sqrt(np.mean(clean_eeg ** 2)))
+        signal_rms = float(np.sqrt(np.mean(reference_signal ** 2)))
         target_noise_rms = signal_rms / (snr_linear + 1e-10)
 
         if self._bank_cov is None or not ch_names:
             noise = rng.standard_normal((C, T)).astype(np.float32) * target_noise_rms
-            return (clean_eeg + noise).astype(np.float32)
+            return (reference_signal + noise).astype(np.float32)
 
         key = tuple(ch_names)
         if key not in self._chol_cache:
@@ -160,4 +166,4 @@ class EmpiricalChannelCov(SensorNoiseEngine):
             noise[matched_rows] = chol @ white_matched
         noise_rms = float(np.sqrt(np.mean(noise ** 2)))
         noise = noise / (noise_rms + 1e-10) * target_noise_rms
-        return (clean_eeg + noise.astype(np.float32)).astype(np.float32)
+        return (reference_signal + noise.astype(np.float32)).astype(np.float32)

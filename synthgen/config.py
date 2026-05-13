@@ -119,7 +119,7 @@ class NoiseConfig(BaseModel):
     """Discrete-grid disturbance ratios using standard array-processing terminology.
 
     Three ratios appear in the generative model
-    ``Y = R( G·Ss + α·G·Sbg + E ) + A``:
+    ``Y = R( G·Ss + α·G·Sbg + E + A )``:
 
     - **SIR** (Signal-to-Interference Ratio, source-level): ``||G·Ss|| / ||α·G·Sbg||``.
       Controls the scale ``α`` of the cerebral background relative to the foreground
@@ -201,9 +201,9 @@ class SEREEGABackendConfig(BaseModel):
 
     Source-level signal amplitudes are fixed to canonical units inside the
     backend (1 µV for the foreground, 0.1 µV for the 1/f background): the
-    physically meaningful quantity is the SNR/SNIR, not the absolute amplitude,
-    which depends on the lead-field gain. Per-epoch normalisation is the
-    consumer's responsibility, matching the DeepSIF / ConvDip / ESINet protocol.
+    physically meaningful quantities are the SIR / SNR / SINR ratios, not the
+    absolute amplitude, which depends on the lead-field gain. Per-epoch
+    normalisation is the consumer's responsibility.
     """
 
     matlab_sereega_path: Path | None = None
