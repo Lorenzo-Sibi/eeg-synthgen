@@ -143,6 +143,65 @@ def test_empirical_resting_snr_approximately_correct():
     assert abs(measured_snr - 20.0) < 3.0
 
 
+def test_empirical_channel_cov_uses_named_channels(tmp_path):
+    """With matched channel names the noise should reflect the target cov off-diag."""
+    from synthgen.acquisition.noise import EmpiricalChannelCov
+
+    C = 6
+    rng = np.random.default_rng(0)
+    target = 1e-10 * np.eye(C) + 0.5e-10 * (np.ones((C, C)) - np.eye(C))
+    ch_names = [f"C{i}" for i in range(C)]
+    bank = tmp_path / "noise.npz"
+    np.savez(
+        bank,
+        sensor_cov=target.astype(np.float32),
+        sensor_cov_ch_names=np.array(ch_names, dtype=object),
+        _manifest_json=np.array("{}"),
+    )
+
+    sc = _make_scenario(snr_db=0.0)
+    engine = EmpiricalChannelCov(bank_path=bank)
+    clean = rng.standard_normal((C, 4000)).astype(np.float32)
+    out = engine.apply(clean, sc, rng, ch_names=ch_names)
+    assert out.shape == (C, 4000)
+    noise = out - clean
+    emp_corr = np.corrcoef(noise)
+    off = emp_corr[~np.eye(C, dtype=bool)]
+    # Target off-diagonal correlation ~ 0.5; with 4000 samples expect within ±0.15
+    assert abs(float(off.mean()) - 0.5) < 0.15
+
+
+def test_empirical_channel_cov_falls_back_when_no_overlap(tmp_path):
+    from synthgen.acquisition.noise import EmpiricalChannelCov
+
+    bank = tmp_path / "noise.npz"
+    np.savez(
+        bank,
+        sensor_cov=np.eye(3, dtype=np.float32),
+        sensor_cov_ch_names=np.array(["A", "B", "C"], dtype=object),
+        _manifest_json=np.array("{}"),
+    )
+    sc = _make_scenario(snr_db=10.0)
+    engine = EmpiricalChannelCov(bank_path=bank)
+    rng = np.random.default_rng(0)
+    clean = rng.standard_normal((4, 500)).astype(np.float32)
+    out = engine.apply(clean, sc, rng, ch_names=["X", "Y", "Z", "W"])
+    assert out.shape == clean.shape
+    assert not np.allclose(out, clean)  # fallback still adds noise
+
+
+def test_empirical_channel_cov_falls_back_when_bank_missing(tmp_path):
+    from synthgen.acquisition.noise import EmpiricalChannelCov
+
+    engine = EmpiricalChannelCov(bank_path=tmp_path / "does_not_exist.npz")
+    sc = _make_scenario(snr_db=10.0)
+    rng = np.random.default_rng(0)
+    clean = rng.standard_normal((4, 500)).astype(np.float32)
+    out = engine.apply(clean, sc, rng, ch_names=["A", "B", "C", "D"])
+    assert out.shape == clean.shape
+    assert not np.allclose(out, clean)
+
+
 # ── ArtifactEngine implementations ────────────────────────────────────────────
 
 def test_ocular_artifact_output_shape(tmp_path):
@@ -399,8 +458,9 @@ def test_pipeline_run_fills_snir_on_scenario(tmp_path):
     sc.temporal_onsets_s = [0.0]
     pipeline = AcquisitionPipeline(config)
     sample, _ = pipeline.run(sc, ss, src, bg, G, ecords, ch_names, np.random.default_rng(2))
-    assert sc.snir_db != 0.0  # pipeline should have filled this in
-    assert sc.snr_sensor_db != 0.0
+    # The pipeline must draw both SNIR and sensor SNR from the configured grids.
+    assert sc.snir_db in config.noise.snir_levels_db
+    assert sc.snr_sensor_db in config.noise.snr_sensor_levels_db
 
 
 def test_pipeline_run_source_support_marks_seeds(tmp_path):

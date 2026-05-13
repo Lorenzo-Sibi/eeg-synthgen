@@ -12,8 +12,11 @@ from synthgen.acquisition.artifacts import (
     MuscularArtifact,
     OcularArtifact,
 )
+from pathlib import Path
+
 from synthgen.acquisition.noise import (
     Colored1fNoise,
+    EmpiricalChannelCov,
     EmpiricalRestingNoise,
     SensorNoiseEngine,
     WhiteGaussianNoise,
@@ -47,10 +50,18 @@ class AcquisitionPipeline:
     def __init__(self, config: GenerationConfig) -> None:
         self._config = config
         self._projector = LinearProjector()
+        calibration_id = config.noise.calibration_id
+        noise_bank_path = (
+            Path("banks/noise") / f"{calibration_id}.npz" if calibration_id else None
+        )
         self._noise_registry: dict[str, SensorNoiseEngine] = {
             "white_gaussian": WhiteGaussianNoise(),
             "colored_1f": Colored1fNoise(config),
             "empirical_resting": EmpiricalRestingNoise(),
+            "empirical_channel_cov": (
+                EmpiricalChannelCov(noise_bank_path) if noise_bank_path is not None
+                else WhiteGaussianNoise()
+            ),
         }
         self._artifact_registry: dict[str, ArtifactEngine] = {
             "ocular": OcularArtifact(config),
@@ -112,7 +123,7 @@ class AcquisitionPipeline:
         noise_weights = np.array(noise_cfg.weights, dtype=np.float64)
         noise_idx = int(rng.choice(len(noise_families), p=noise_weights / noise_weights.sum()))
         noise_family = noise_families[noise_idx]
-        noisy_eeg = self._noise_registry[noise_family].apply(signal_eeg, scenario, rng)
+        noisy_eeg = self._noise_registry[noise_family].apply(signal_eeg, scenario, rng, ch_names=ch_names)
 
         # 4. Optionally inject an artifact (uniform family choice — ArtifactConfig has no weights)
         if float(rng.uniform(0.0, 1.0)) < artifact_cfg.artifact_prob:
