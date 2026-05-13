@@ -144,25 +144,31 @@ class AcquisitionPipeline:
             noisy_eeg = self._artifact_registry[artifact_family].apply(noisy_eeg, scenario, rng)
             scenario.artifact_flags.append(artifact_family)
 
-        # 5. Apply reference
-        ref_op = _make_reference_op(self._config.reference, ch_names)
-        final_eeg = ref_op.apply(noisy_eeg).astype(np.float32)
-
-        # 6. Measured ratios. Sensor noise = (signal+noise) − signal; total
-        # disturbance = (final − signal_eeg_referenced) captures background +
-        # noise + artifact. Reference is applied to the signal to compare apples
-        # to apples (artifacts/background are re-referenced too).
-        signal_eeg_ref = ref_op.apply(signal_eeg).astype(np.float32)
+        # 5. Measured ratios — all three computed pre-reference, against the
+        # same `signal_eeg`, so they are directly comparable to one another and
+        # to the targets. Applying the reference operator first would shrink
+        # disturbance power (it subtracts the per-time-point channel mean) more
+        # than it shrinks signal_eeg, biasing measured_sinr upward.
+        #
+        # Components:
+        #   sensor_noise = signal_plus_noise − signal_eeg        (pure E)
+        #   scaled_bg    = bg_scale · bg_eeg                     (α·G·Sbg)
+        #   disturbance  = noisy_eeg − signal_eeg                (α·G·Sbg + E + A)
         sensor_noise = (signal_plus_noise - signal_eeg).astype(np.float32)
         scaled_bg = (bg_scale * bg_eeg).astype(np.float32)
+        disturbance = (noisy_eeg - signal_eeg).astype(np.float32)
         signal_power = float(np.mean(signal_eeg ** 2))
         sensor_noise_power = float(np.mean(sensor_noise ** 2))
         scaled_bg_power = float(np.mean(scaled_bg ** 2))
-        disturbance_power = float(np.mean((final_eeg - signal_eeg_ref) ** 2))
+        disturbance_power = float(np.mean(disturbance ** 2))
         measured_sir = float(10.0 * np.log10((signal_power + 1e-20) / (scaled_bg_power + 1e-20))) \
             if scaled_bg_power > 1e-20 else float("inf")
         measured_snr = float(10.0 * np.log10((signal_power + 1e-20) / (sensor_noise_power + 1e-20)))
         measured_sinr = float(10.0 * np.log10((signal_power + 1e-20) / (disturbance_power + 1e-20)))
+
+        # 6. Apply reference to produce the final EEG that is written to disk.
+        ref_op = _make_reference_op(self._config.reference, ch_names)
+        final_eeg = ref_op.apply(noisy_eeg).astype(np.float32)
 
         # Record target SINR (derived from SIR & SNR) so downstream code can
         # check measured vs target without re-deriving the formula.

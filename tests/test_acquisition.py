@@ -451,7 +451,7 @@ def test_pipeline_run_eeg_dtype(tmp_path):
     assert sample.eeg.dtype == np.float32
 
 
-def test_pipeline_run_fills_snir_on_scenario(tmp_path):
+def test_pipeline_run_fills_ratios_on_scenario(tmp_path):
     from synthgen.acquisition.pipeline import AcquisitionPipeline
     config = _make_config(tmp_path)
     N, C, T = 20, 8, config.temporal.n_samples_per_window
@@ -462,9 +462,89 @@ def test_pipeline_run_fills_snir_on_scenario(tmp_path):
     sc.temporal_onsets_s = [0.0]
     pipeline = AcquisitionPipeline(config)
     sample, _ = pipeline.run(sc, ss, src, bg, G, ecords, ch_names, np.random.default_rng(2))
-    # The pipeline must draw both SNIR and sensor SNR from the configured grids.
+    # The pipeline must draw both SIR and SNR from the configured grids and
+    # derive SINR analytically from them.
     assert sc.sir_db in config.noise.sir_levels_db
     assert sc.snr_db in config.noise.snr_levels_db
+    expected_sinr = -10.0 * np.log10(
+        10.0 ** (-sc.sir_db / 10.0) + 10.0 ** (-sc.snr_db / 10.0)
+    )
+    assert abs(sc.sinr_db - expected_sinr) < 1e-6
+
+
+def test_pipeline_run_background_reaches_eeg(tmp_path):
+    """Regression for B1: the scaled background must actually appear in the
+    final EEG. If noise is applied to signal_eeg and the background is dropped
+    on the floor, two runs that differ only in the background activity will
+    produce identical EEG. This test fixes a 1-element-grid config so SIR/SNR
+    are deterministic, runs the pipeline twice with identical RNG and signal
+    but different backgrounds, and checks the outputs diverge.
+    """
+    from synthgen.acquisition.pipeline import AcquisitionPipeline
+    from synthgen.config import NoiseConfig
+
+    config = _make_config(tmp_path)
+    # Deterministic 1-element grid + white noise only + no artifact, so the
+    # only stochastic difference between the two runs is the background.
+    config.noise = NoiseConfig(
+        families=["white_gaussian"], weights=[1.0],
+        sir_levels_db=[10.0], snr_levels_db=[20.0],
+    )
+    config.artifacts.artifact_prob = 0.0
+
+    N, C, T = 20, 8, config.temporal.n_samples_per_window
+    src, bg, G, ecords, ch_names, ss = _make_pipeline_inputs(N=N, C=C, T=T)
+    bg_zero = np.zeros_like(bg)
+    pipeline = AcquisitionPipeline(config)
+
+    def _make_sc():
+        s = _make_scenario()
+        s.seed_vertex_indices = [0]
+        s.dominant_frequencies_hz = [10.0]
+        s.temporal_onsets_s = [0.0]
+        return s
+
+    sample_bg, _ = pipeline.run(_make_sc(), ss, src, bg, G, ecords, ch_names, np.random.default_rng(7))
+    sample_nobg, _ = pipeline.run(_make_sc(), ss, src, bg_zero, G, ecords, ch_names, np.random.default_rng(7))
+
+    diff_rms = float(np.sqrt(np.mean((sample_bg.eeg - sample_nobg.eeg) ** 2)))
+    sig_rms = float(np.sqrt(np.mean(sample_bg.eeg ** 2)))
+    # With SIR=10 dB the background contributes ~0.32x the signal RMS,
+    # which is far above any float noise floor.
+    assert diff_rms > 0.1 * sig_rms, (
+        f"background does not reach final EEG: diff_rms={diff_rms:.4g}, "
+        f"sig_rms={sig_rms:.4g}"
+    )
+
+
+def test_pipeline_measured_ratios_match_targets(tmp_path):
+    """The realized SIR/SNR/SINR on the produced sample should match the
+    targets recorded in scenario, modulo sampling noise from the noise engine.
+    SIR is deterministic (bg_scale is closed-form) so it must match exactly.
+    """
+    from synthgen.acquisition.pipeline import AcquisitionPipeline
+    from synthgen.config import NoiseConfig
+
+    config = _make_config(tmp_path)
+    config.noise = NoiseConfig(
+        families=["white_gaussian"], weights=[1.0],
+        sir_levels_db=[5.0], snr_levels_db=[12.0],
+    )
+    config.artifacts.artifact_prob = 0.0
+
+    # Use a long window so the realized SNR converges tightly.
+    N, C, T = 20, 8, 5000
+    src, bg, G, ecords, ch_names, ss = _make_pipeline_inputs(N=N, C=C, T=T)
+    sc = _make_scenario()
+    sc.seed_vertex_indices = [0]
+    sc.dominant_frequencies_hz = [10.0]
+    sc.temporal_onsets_s = [0.0]
+    pipeline = AcquisitionPipeline(config)
+    sample, _ = pipeline.run(sc, ss, src, bg, G, ecords, ch_names, np.random.default_rng(11))
+
+    assert abs(sample.sir_measured_db - sc.sir_db) < 1e-3, sample.sir_measured_db
+    assert abs(sample.snr_measured_db - sc.snr_db) < 0.5, sample.snr_measured_db
+    assert abs(sample.sinr_measured_db - sc.sinr_db) < 0.5, sample.sinr_measured_db
 
 
 def test_pipeline_run_source_support_marks_seeds(tmp_path):
