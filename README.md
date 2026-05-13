@@ -7,7 +7,7 @@ Synthetic EEG dataset generator for training EEG source localization models.
 This package generates large-scale synthetic EEG datasets with full ground-truth source activity, designed for training deep neural networks, specifically diffusion/flow-matching models. Every sample generated through this package, follows an explicit, fully controlled generative model:
 
 ```
-Y = R( G · (S_active + α · S_bg) + E_sensor + A_artifact )
+Y = R( A( G · (S_active + α · S_bg) + E_sensor ) )
 ```
 
 where:
@@ -18,8 +18,8 @@ where:
 - `S_bg` is background brain activity (NxT), also from the source backend
 - `α` is a scale factor achieving the target SIR (source-level signal-to-interference ratio)
 - `E_sensor` is sensor noise (white Gaussian, 1/f colored, or empirical resting-state)
-- `A_artifact` is optional artifact injection (ocular, muscular, line noise, bad channel dropout)
-- `R(·)` is the reference operator (average reference, fixed channel, or none); applied to the full sum because sensor noise and artifacts are electrode-side disturbances that are themselves re-referenced.
+- `A(·)` is the artifact operator, applied with probability `artifacts.artifact_prob`; otherwise the identity. For ocular, muscular, and line-noise families A is additive (`A(X) = X + δ`); for `bad_channel_dropout` A is a multiplicative channel mask (`A(X) = M ⊙ X` with M zeroing a random subset of rows).
+- `R(·)` is the reference operator (average reference, fixed channel, or none); applied to the artifact-corrupted sensor signal because both noise and artifacts are electrode-side disturbances that are themselves re-referenced.
 
 Every parameter that controls this model is recorded as sample metadata in `metadata.jsonl`, enabling full reconstruction of any sample from its `Scenario` record.
 
@@ -510,7 +510,7 @@ Background is generated in source space at the same (N, T) shape as `source_acti
 
 ### `noise`
 
-The acquisition model is `Y = R( G·Ss + α·G·Sbg + E + A )` with three disturbance ratios in the standard array-processing taxonomy (Van Veen et al., IEEE TBME 44(9), 1997):
+The acquisition model is `Y = R( A( G·Ss + α·G·Sbg + E ) )` with three disturbance ratios in the standard array-processing taxonomy (Van Veen et al., IEEE TBME 44(9), 1997). The artifact operator `A` is the identity with probability `1 − artifacts.artifact_prob`, additive for ocular/muscular/line-noise, and a channel-zero mask for bad-channel-dropout; SIR and SNR characterize the brain-side model below it:
 
 - **SIR** = `||G·Ss|| / ||α·G·Sbg||` — source-level (signal vs cerebral background).
 - **SNR** = `||G·Ss|| / ||E||` — sensor-level (signal vs measurement noise).
@@ -624,10 +624,11 @@ SensorNoiseEngine.apply(signal_eeg) ← noise std calibrated against ||signal_ee
     ↓  signal_plus_noise (CxT)
 [add scaled background]
     ↓  noisy_eeg = signal_plus_noise + bg_scale·bg_eeg
-ArtifactEngine.apply()              ← optional, with probability artifact_prob
-    ↓  noisy_eeg (CxT)
+ArtifactEngine.apply()              ← optional, with probability artifact_prob;
+    ↓  noisy_eeg (CxT)                additive (ocular/muscular/line_noise) or
+                                      channel-mask (bad_channel_dropout).
 [measure realized SIR / SNR / SINR — pre-reference, vs signal_eeg]
-ReferenceOperator.apply()           ← applied to the full sum
+ReferenceOperator.apply()           ← applied last, to the artifact-corrupted signal
     ↓  final_eeg (CxT)
 check_sample()
     ↓  QCResult

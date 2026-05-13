@@ -119,7 +119,9 @@ class NoiseConfig(BaseModel):
     """Discrete-grid disturbance ratios using standard array-processing terminology.
 
     Three ratios appear in the generative model
-    ``Y = R( G·Ss + α·G·Sbg + E + A )``:
+    ``Y = R( A( G·Ss + α·G·Sbg + E ) )``, where ``A`` is the (optional) artifact
+    operator (identity, additive disturbance, or channel-zero mask depending on
+    the artifact family):
 
     - **SIR** (Signal-to-Interference Ratio, source-level): ``||G·Ss|| / ||α·G·Sbg||``.
       Controls the scale ``α`` of the cerebral background relative to the foreground
