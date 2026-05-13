@@ -159,9 +159,13 @@ class AcquisitionPipeline:
         # than it shrinks signal_eeg, biasing measured_sinr upward.
         #
         # Components:
-        #   sensor_noise = signal_plus_noise − signal_eeg        (pure E)
-        #   scaled_bg    = bg_scale · bg_eeg                     (α·G·Sbg)
-        #   disturbance  = noisy_eeg − signal_eeg                (α·G·Sbg + E + A)
+        #   sensor_noise = signal_plus_noise − signal_eeg        (= pure E by construction)
+        #   scaled_bg    = bg_scale · bg_eeg                     (= α·G·Sbg by construction)
+        #   disturbance  = noisy_eeg − signal_eeg                (everything in Y that is not the foreground)
+        # The disturbance equals α·G·Sbg + E + δ when the artifact is additive
+        # (ocular/muscular/line_noise). For bad_channel_dropout it equals
+        # α·G·Sbg + E on kept channels and −signal_eeg on dropped channels,
+        # which makes measured_sinr drop sharply below the target SINR.
         sensor_noise = (signal_plus_noise - signal_eeg).astype(np.float32)
         scaled_bg = (bg_scale * bg_eeg).astype(np.float32)
         disturbance = (noisy_eeg - signal_eeg).astype(np.float32)
