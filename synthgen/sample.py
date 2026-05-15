@@ -42,6 +42,7 @@ class Scenario:
     snir_db: float = 0.0
     snr_sensor_db: float = 0.0
     artifact_flags: list[str] = field(default_factory=list)
+    backend_used: str = ""
 
 
 @dataclass

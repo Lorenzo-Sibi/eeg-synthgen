@@ -79,12 +79,18 @@ class PipelineRunner:
         config = self._config
         self._anatomy_bank = AnatomyBank(config.anatomy_bank)
         self._leadfield_bank = LeadfieldBank(config.leadfield_bank)
+        self._tvb_backend = None
         if config.backend == "sereega":
             self._backend = SEREEGABackend(config)
         elif config.backend == "tvb":
             self._connectivity_bank = ConnectivityBank(config.connectivity_bank)
             conn = self._connectivity_bank.load(config.tvb.connectivity_scheme)
             self._backend = TVBSourceGenerator(config, conn)
+        elif config.backend == "mix":
+            self._backend = SEREEGABackend(config)
+            self._connectivity_bank = ConnectivityBank(config.connectivity_bank)
+            conn = self._connectivity_bank.load(config.tvb.connectivity_scheme)
+            self._tvb_backend = TVBSourceGenerator(config, conn)
         else:
             raise ValueError(f"Unknown backend {config.backend!r}")
         self._pipeline = AcquisitionPipeline(config)
@@ -109,12 +115,18 @@ class PipelineRunner:
         prior = _PRIOR_REGISTRY[scenario.prior_family]()
         scenario = prior.sample(scenario, source_space, scenario_rng)
 
-        # Generate source-space signals
-        source_activity, background_activity = self._backend.generate(
-            scenario,
-            source_space,
-            scenario_rng
-        )
+        # Generate source-space signals; for backend="mix" route per-scenario
+        # via the scenario RNG (deterministic from scenario.seed).
+        if self._tvb_backend is not None and scenario_rng.random() < self._config.mix_tvb_fraction:
+            scenario.backend_used = "tvb"
+            source_activity, background_activity = self._tvb_backend.generate(
+                scenario, source_space, scenario_rng
+            )
+        else:
+            scenario.backend_used = "sereega" if self._config.backend != "tvb" else "tvb"
+            source_activity, background_activity = self._backend.generate(
+                scenario, source_space, scenario_rng
+            )
 
         # Acquisition: project -> noise -> artifact -> reference -> QC
         sample, qc = self._pipeline.run(
@@ -130,7 +142,7 @@ class PipelineRunner:
         return (sample, qc, scenario)
 
     def run(self) -> None:
-        if self._config.n_workers <= 1 or self._config.backend == "tvb":
+        if self._config.n_workers <= 1 or self._config.backend in ("tvb", "mix"):
             return self._run_sequential()
         return self._run_parallel()
 
