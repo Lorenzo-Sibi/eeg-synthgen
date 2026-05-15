@@ -9,8 +9,14 @@ from synthgen.banks.connectivity import Connectivity
 from synthgen.config import GenerationConfig
 from synthgen.sample import Scenario, SourceSpace
 from synthgen.sources.base import SourceGeneratorBackend
-from synthgen.sources.tvb_models import get_tvb_model
-from synthgen.sources.tvb_stimulus import build_stimulus_pattern, seed_parcel_ids
+from synthgen.sources.tvb_stimulus import seed_parcel_ids
+
+# Source-level preprocessing for the TVB backend follows the convention of
+# DeepSIF (Sun et al. 2022, process_raw_nmm.m) and other TVB-based synthetic
+# data papers: DC removal per region, no amplitude normalisation. The
+# absolute output remains in TVB native mV-like units. Cross-backend
+# amplitude alignment (TVB vs SEREEGA) is handled at sensor level by
+# AcquisitionPipeline using a real-EEG-derived reference, not here.
 
 
 def _require_tvb() -> None:
@@ -37,15 +43,65 @@ def _build_tvb_connectivity(conn: Connectivity, speed_mm_per_ms: float) -> Any:
     return tvb_conn
 
 
-def _build_simulator(cfg_tvb, tvb_conn, stim=None):
+def _build_jansen_rit(cfg_tvb, A_per_region: np.ndarray) -> Any:
+    """DeepSIF-style Jansen-Rit with per-region excitability `A`."""
+    from tvb.simulator import models
+
+    return models.JansenRit(
+        A=A_per_region.astype(np.float64),
+        mu=np.array([cfg_tvb.jr_mu]),
+        v0=np.array([cfg_tvb.jr_v0]),
+        p_max=np.array([cfg_tvb.jr_p_max]),
+        p_min=np.array([cfg_tvb.jr_p_min]),
+    )
+
+
+def _deepsif_noise_sigma(model, std: float) -> np.ndarray:
+    """DeepSIF noise spec: sigma applied only to state-variable index 4.
+
+    sigma[4] = (a * 3.25 * (p_max - p_min) * 0.5 * std) ** 2 / 2
+
+    where `a` is the JR sigmoid steepness parameter (model.a), the 3.25
+    factor matches the canonical excitatory PSP amplitude, and the entire
+    expression yields the variance (not std) of the additive perturbation.
+    Other state variables receive zero noise — matching DeepSIF exactly.
+    """
+    a = float(np.asarray(model.a).flat[0])
+    p_max = float(np.asarray(model.p_max).flat[0])
+    p_min = float(np.asarray(model.p_min).flat[0])
+    phi_n_scaling = (a * 3.25 * (p_max - p_min) * 0.5 * float(std)) ** 2 / 2.0
+    sigma = np.zeros(6, dtype=np.float64)
+    sigma[4] = phi_n_scaling
+    return sigma
+
+
+def _build_simulator(cfg_tvb, tvb_conn, A_per_region: np.ndarray):
+    """Build a DeepSIF-style TVB simulator: SigmoidalJansenRit coupling,
+    per-region A on JansenRit model, HeunStochastic with targeted noise."""
     from tvb.simulator import coupling, integrators, monitors, noise, simulator
 
-    model = get_tvb_model(cfg_tvb.model)
-    cpl = coupling.Linear(a=np.array([cfg_tvb.global_coupling]))
-    integ = integrators.HeunStochastic(
-        dt=cfg_tvb.integrator_dt_ms,
-        noise=noise.Additive(nsig=np.array([cfg_tvb.noise_sigma])),
-    )
+    model_name = cfg_tvb.model
+    if model_name != "jansen_rit":
+        # The DeepSIF-style elevation is JR-specific. For other models we
+        # fall back to uniform A_baseline (no source elevation) and Linear
+        # coupling, preserving the existing behaviour.
+        from synthgen.sources.tvb_models import get_tvb_model
+
+        model = get_tvb_model(model_name)
+        cpl = coupling.Linear(a=np.array([cfg_tvb.global_coupling]))
+        integ = integrators.HeunStochastic(
+            dt=cfg_tvb.integrator_dt_ms,
+            noise=noise.Additive(nsig=np.array([float(cfg_tvb.noise_std) ** 2])),
+        )
+    else:
+        model = _build_jansen_rit(cfg_tvb, A_per_region)
+        cpl = coupling.SigmoidalJansenRit(a=np.array([cfg_tvb.global_coupling]))
+        sigma = _deepsif_noise_sigma(model, cfg_tvb.noise_std)
+        integ = integrators.HeunStochastic(
+            dt=cfg_tvb.integrator_dt_ms,
+            noise=noise.Additive(nsig=sigma),
+        )
+
     mon = monitors.TemporalAverage(period=cfg_tvb.integrator_dt_ms)
     sim = simulator.Simulator(
         model=model,
@@ -53,7 +109,6 @@ def _build_simulator(cfg_tvb, tvb_conn, stim=None):
         coupling=cpl,
         integrator=integ,
         monitors=(mon,),
-        stimulus=stim,
     )
     return sim
 
@@ -95,11 +150,21 @@ def _resample_to(
 
 
 class TVBSourceGenerator(SourceGeneratorBackend):
-    """TVB-backed generator for (source_activity, background_activity).
+    """TVB-backed generator following the DeepSIF methodology (Sun et al. 2022,
+    Rong et al. 2025).
 
-    Both components are derived from paired TVB NMM simulations on the
-    scenario's parcellation. The source term is isolated via
-    with-vs-without-stimulus subtraction on seed parcels.
+    A *single* TVB simulation drives both source and background activity:
+      - The Jansen-Rit excitability parameter ``A`` is elevated on the seed
+        parcels (default 3.5 vs 3.25 baseline). The elevated regions become
+        prone to spike-like activity under the network's noise and inputs.
+      - The simulator output on seed parcels (broadcast to vertices via
+        ``parcellation``) becomes ``source_activity``; non-seed vertices are
+        zero (the framework's contract).
+      - The same simulator output on *all* parcels (broadcast similarly)
+        becomes ``background_activity``.
+
+    No external ``StimuliRegion`` is injected. No paired with-vs-without
+    subtraction is performed. This matches DeepSIF/generate_tvb_data.py.
     """
 
     def __init__(
@@ -114,45 +179,6 @@ class TVBSourceGenerator(SourceGeneratorBackend):
         self._tvb_conn = _build_tvb_connectivity(
             connectivity, self._cfg_tvb.conduction_speed_mm_per_ms
         )
-
-    def _make_stim(
-        self,
-        weights_R: np.ndarray,
-        temporal_pattern: np.ndarray,
-        dt_ms: float,
-    ) -> Any:
-        from tvb.basic.neotraits.api import Attr
-        from tvb.datatypes.equations import TemporalApplicableEquation
-        from tvb.datatypes.patterns import StimuliRegion
-
-        class _Pattern(TemporalApplicableEquation):
-            equation = Attr(
-                field_type=str,
-                label="External",
-                default="externally_provided",
-                doc="externally provided discrete pattern sampled at dt_ms",
-            )
-
-            def __init__(self, vals: np.ndarray, step_ms: float) -> None:
-                super().__init__()
-                self._vals = np.asarray(vals, dtype=np.float64)
-                self._step_ms = step_ms
-
-            def evaluate(self, var):
-                t_ms = np.asarray(var, dtype=np.float64)
-                idx = np.clip(
-                    (t_ms / self._step_ms).astype(int), 0, len(self._vals) - 1
-                )
-                return self._vals[idx]
-
-        eq = _Pattern(temporal_pattern, dt_ms)
-        stim = StimuliRegion(
-            connectivity=self._tvb_conn,
-            weight=weights_R.astype(np.float64),
-            temporal=eq,
-        )
-        stim.configure_space()
-        return stim
 
     def generate(
         self,
@@ -173,49 +199,45 @@ class TVBSourceGenerator(SourceGeneratorBackend):
         T = self._cfg.temporal.n_samples_per_window
         window_ms = self._cfg.temporal.window_s * 1000.0
         dt_ms = self._cfg_tvb.integrator_dt_ms
-        T_tvb = int(window_ms / dt_ms)
 
         seed_parcels = seed_parcel_ids(scenario, parc)
-        temporal_pattern = build_stimulus_pattern(
-            scenario,
-            T=T_tvb,
-            sfreq=1000.0 / dt_ms,
-            amplitude=self._cfg_tvb.stimulus_amplitude,
-            rng=rng,
-        )
-        weights_R = np.zeros(R, dtype=np.float64)
+
+        A_per_region = np.full(R, float(self._cfg_tvb.jr_A_baseline), dtype=np.float64)
         if seed_parcels.size:
-            weights_R[seed_parcels] = 1.0
-        stim = self._make_stim(weights_R, temporal_pattern, dt_ms) if seed_parcels.size else None
+            A_per_region[seed_parcels] = float(self._cfg_tvb.jr_A_seed)
 
         noise_seed = int(rng.integers(0, 2**31 - 1))
         warmup_ms = self._cfg_tvb.warmup_s * 1000.0
         total_ms = warmup_ms + window_ms
 
-        baseline_raw = self._run_sim(noise_seed, total_ms, stim=None)
-        stim_raw = self._run_sim(noise_seed, total_ms, stim=stim)
+        raw = self._run_sim(noise_seed, total_ms, A_per_region)
 
         keep = int(window_ms / dt_ms)
-        baseline_raw = baseline_raw[-keep:]
-        stim_raw = stim_raw[-keep:]
-
-        baseline_R = _extract_observable(baseline_raw, self._cfg_tvb.model)
-        stim_R = _extract_observable(stim_raw, self._cfg_tvb.model)
+        raw = raw[-keep:]
+        y_R = _extract_observable(raw, self._cfg_tvb.model)  # (R, T_tvb)
 
         sfreq_tvb = 1000.0 / dt_ms
-        baseline_R = _resample_to(baseline_R, sfreq_tvb, sfreq, T)
-        stim_R = _resample_to(stim_R, sfreq_tvb, sfreq, T)
+        y_R = _resample_to(y_R, sfreq_tvb, sfreq, T)         # (R, T)
 
-        background = baseline_R[parc, :].astype(np.float32)
+        # DC removal per region (standard NMM preprocessing — same first step
+        # as DeepSIF rescale_nmm_channel). Preserves native NMM amplitudes;
+        # absolute-scale alignment with SEREEGA happens at sensor level.
+        y_R = (y_R - y_R.mean(axis=1, keepdims=True)).astype(np.float32)
+
+        background = y_R[parc, :].astype(np.float32)
         source = np.zeros((N, T), dtype=np.float32)
         if seed_parcels.size:
             seed_mask = np.isin(parc, seed_parcels)
-            diff_R = (stim_R - baseline_R).astype(np.float32)
-            source[seed_mask] = diff_R[parc[seed_mask], :]
+            source[seed_mask] = y_R[parc[seed_mask], :]
         return source, background
 
-    def _run_sim(self, noise_seed: int, duration_ms: float, stim):
-        sim = _build_simulator(self._cfg_tvb, self._tvb_conn, stim=stim)
+    def _run_sim(
+        self,
+        noise_seed: int,
+        duration_ms: float,
+        A_per_region: np.ndarray,
+    ) -> np.ndarray:
+        sim = _build_simulator(self._cfg_tvb, self._tvb_conn, A_per_region)
         sim.integrator.noise.random_stream = np.random.RandomState(noise_seed)
         sim.configure()
         sim.simulation_length = duration_ms
