@@ -132,3 +132,29 @@ def test_parcellation_scheme_mismatch_raises(tmp_path):
     sc = _scenario(seeds=[0])
     with pytest.raises(ValueError, match="parcellation_scheme mismatch"):
         backend.generate(sc, ss, np.random.default_rng(0))
+
+
+def test_parcel_to_vertex_mapping_is_piecewise_constant(tmp_path):
+    """Locks in the by-construction property `background = baseline_R[parc, :]`:
+    vertices sharing a parcel must carry an identical time series.
+
+    This guarantees that any future refactor that introduces vertex-level
+    interpolation, smoothing, or averaging across the parcel boundary will
+    break the test rather than silently produce a different ground truth.
+    """
+    cfg = _tiny_config(tmp_path)
+    conn = _tiny_conn()
+    backend = TVBSourceGenerator(cfg, conn)
+    ss = _tiny_source_space()
+    sc = _scenario(seeds=[0])
+    _, bg = backend.generate(sc, ss, np.random.default_rng(0))
+
+    parc = ss.parcellation
+    for p in np.unique(parc):
+        mask = parc == p
+        if mask.sum() < 2:
+            continue
+        ref = bg[mask][0]
+        assert np.allclose(bg[mask], ref[None, :], rtol=1e-5, atol=1e-7), (
+            f"background varies within parcel {p}"
+        )

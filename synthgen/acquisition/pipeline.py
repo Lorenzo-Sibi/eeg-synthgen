@@ -54,6 +54,12 @@ class AcquisitionPipeline:
         noise_bank_path = (
             Path("banks/noise") / f"{calibration_id}.npz" if calibration_id else None
         )
+        # Reference sensor-level RMS, derived from real EEG (PhysioNet EEGMMIDB
+        # resting-state baseline) as the median of sqrt(diag(sensor_cov)).
+        # Used to pre-normalise signal_eeg and bg_eeg so backends with very
+        # different native amplitude conventions (TVB mV vs SEREEGA µV) end
+        # up in the same physiological range before SNIR scaling.
+        self._target_bg_sensor_rms = self._load_reference_sensor_rms(noise_bank_path)
         self._noise_registry: dict[str, SensorNoiseEngine] = {
             "white_gaussian": WhiteGaussianNoise(),
             "colored_1f": Colored1fNoise(config),
@@ -70,6 +76,20 @@ class AcquisitionPipeline:
             "bad_channel_dropout": BadChannelDropout(),
         }
         self._config_hash = _hash_config(config)
+
+    @staticmethod
+    def _load_reference_sensor_rms(noise_bank_path) -> float | None:
+        """Median of sqrt(diag(sensor_cov)) from the calibration bank, or None."""
+        if noise_bank_path is None or not noise_bank_path.exists():
+            return None
+        bank = np.load(noise_bank_path, allow_pickle=True)
+        if "sensor_cov" not in bank.files:
+            return None
+        diag = np.diag(np.asarray(bank["sensor_cov"], dtype=np.float64))
+        diag = diag[diag > 0]
+        if diag.size == 0:
+            return None
+        return float(np.sqrt(np.median(diag)))
 
     def run(
         self,
@@ -100,6 +120,22 @@ class AcquisitionPipeline:
         # 1. Project to sensor space
         signal_eeg = self._projector.project(source_activity, leadfield).astype(np.float32)
         bg_eeg = self._projector.project(background_activity, leadfield).astype(np.float32)
+
+        # 1.5 Pre-normalise sensor-level RMS to the real-EEG-derived reference
+        # (median of sqrt(diag(sensor_cov)) from banks/noise/<id>.npz). Background
+        # is anchored at the reference; signal is anchored at 10x the reference
+        # (~20 dB nominal SNIR before bg_scale adjustment, matching SEREEGA's
+        # native 1.0 vs 0.1 µV source-space convention). Backends with very
+        # different native amplitude conventions (TVB mV-scale vs SEREEGA µV-scale)
+        # therefore produce comparable sensor-level amplitudes; spectral shape
+        # and spatial structure of each backend are preserved.
+        if self._target_bg_sensor_rms is not None:
+            sig_rms_pre = float(np.sqrt(np.mean(signal_eeg ** 2)))
+            if sig_rms_pre > 1e-12:
+                signal_eeg = (signal_eeg * (10.0 * self._target_bg_sensor_rms / sig_rms_pre)).astype(np.float32)
+            bg_rms_pre = float(np.sqrt(np.mean(bg_eeg ** 2)))
+            if bg_rms_pre > 1e-12:
+                bg_eeg = (bg_eeg * (self._target_bg_sensor_rms / bg_rms_pre)).astype(np.float32)
 
         # 2. Scale background to achieve target SNIR (discrete grid, DeepSIF protocol)
         target_snir_db = float(rng.choice(noise_cfg.snir_levels_db))    # SNIR = S / (b * S_bg)

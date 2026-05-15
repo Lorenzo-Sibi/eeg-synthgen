@@ -106,16 +106,23 @@ sereega:
   patch_spatial_sigma_mm_range: [12.0, 25.0]
 
 tvb:
+  # DeepSIF-style Jansen-Rit (Sun 2022, Rong 2025): SigmoidalJansenRit coupling,
+  # elevated A on seed parcels, single TVB simulation per sample.
   model: jansen_rit
   connectivity_scheme: deepsif_994
-  global_coupling: 0.02
-  noise_sigma: 1.0e-5
-  integrator_dt_ms: 1.0
+  global_coupling: 1.0          # `a` in SigmoidalJansenRit (DeepSIF default)
+  noise_std: 1.0                # DeepSIF std parameter; sigma derived inside backend
+  integrator_dt_ms: 0.5
   warmup_s: 5.0
   reservoir_duration_s: 60.0
   reservoir_size: 100
-  stimulus_amplitude: 1.0
   conduction_speed_mm_per_ms: 3.0
+  jr_A_baseline: 3.25
+  jr_A_seed: 3.5
+  jr_mu: 0.083
+  jr_v0: 6.0
+  jr_p_min: 0.03
+  jr_p_max: 0.15
 
 n_samples: 100000
 n_workers: 4
